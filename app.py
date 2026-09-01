@@ -1,6 +1,6 @@
 """
-Главное веб-приложение для мониторинга ценников конкурентов сети "Самбери".
-Работает на базе Google Gemini Vision AI с жестко зашитым API-ключом и порогом точности 90%.
+Самбери: Мониторинг ценников конкурентов
+Современный красивый интерфейс на Streamlit с Google Gemini Vision AI
 """
 
 import os
@@ -12,501 +12,1023 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-from PIL import Image
 
-# Зашитый API-ключ Gemini по умолчанию
 DEFAULT_GEMINI_KEY = os.getenv("GEMINI_API_KEY") or (
-    st.secrets.get("GEMINI_API_KEY") if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets else "AQ.Ab8RN6IDk5YuonlD9QV_bFxAg0TVY_ofWJKSTOk7Q0eUnv7Yeg"
+    st.secrets.get("GEMINI_API_KEY", "AQ.Ab8RN6IDk5YuonlD9QV_bFxAg0TVY_ofWJKSTOk7Q0eUnv7Yeg")
+    if hasattr(st, "secrets") else "AQ.Ab8RN6IDk5YuonlD9QV_bFxAg0TVY_ofWJKSTOk7Q0eUnv7Yeg"
 )
-
-# Фиксированный порог точности матчинга
 MATCH_THRESHOLD = 90.0
 
-# Добавляем корень проекта в sys.path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
-
 from core.vision_extractor import PriceTagExtractor
 from core.matcher import CatalogMatcher
 from core.analytics import calculate_price_metrics, summarize_price_index
 from core.exporter import export_comparison_to_excel
 
-# Конфигурация страницы Streamlit (без боковой панели, чистый полноэкранный интерфейс)
 st.set_page_config(
-    page_title="Самбери: Мониторинг ценников",
+    page_title="Самбери — Мониторинг ценников",
     page_icon="🛒",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
-# Пользовательские стили CSS
 st.markdown("""
 <style>
-    [data-testid="stSidebar"] {
-        display: none;
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+    html, body, [class*="css"] {
+        font-family: 'Inter', sans-serif !important;
     }
-    .main-title {
-        font-size: 2.2rem;
-        font-weight: 700;
-        color: #1E3A8A;
-        margin-bottom: 0.2rem;
+
+    /* === ОБЩИЙ ФОН === */
+    .stApp {
+        background: linear-gradient(135deg, #0F172A 0%, #1E293B 50%, #0F172A 100%);
+        min-height: 100vh;
     }
-    .sub-title {
+
+    /* === ШАПКА === */
+    .hero-block {
+        background: linear-gradient(135deg, #1E3A8A 0%, #1D4ED8 50%, #2563EB 100%);
+        border-radius: 20px;
+        padding: 40px 48px;
+        margin-bottom: 32px;
+        position: relative;
+        overflow: hidden;
+        box-shadow: 0 25px 60px rgba(29, 78, 216, 0.4);
+    }
+    .hero-block::before {
+        content: "";
+        position: absolute;
+        top: -60px; right: -60px;
+        width: 250px; height: 250px;
+        border-radius: 50%;
+        background: rgba(255,255,255,0.05);
+    }
+    .hero-block::after {
+        content: "";
+        position: absolute;
+        bottom: -80px; left: -40px;
+        width: 300px; height: 300px;
+        border-radius: 50%;
+        background: rgba(255,255,255,0.03);
+    }
+    .hero-title {
+        font-size: 2.6rem;
+        font-weight: 800;
+        color: #FFFFFF;
+        letter-spacing: -0.5px;
+        margin: 0 0 10px 0;
+        line-height: 1.1;
+    }
+    .hero-subtitle {
         font-size: 1.05rem;
-        color: #4B5563;
-        margin-bottom: 1.5rem;
+        color: rgba(255,255,255,0.75);
+        margin: 0;
+        font-weight: 400;
     }
-    .metric-card {
-        background-color: #F8FAFC;
-        border-radius: 10px;
-        padding: 15px;
-        border-left: 5px solid #1E3A8A;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    .hero-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: rgba(255,255,255,0.15);
+        border: 1px solid rgba(255,255,255,0.2);
+        border-radius: 20px;
+        padding: 6px 14px;
+        font-size: 0.8rem;
+        color: #fff;
+        font-weight: 500;
+        margin-bottom: 16px;
     }
-    .stTabs [data-baseweb="tab-list"] {
+
+    /* === КАРТОЧКИ === */
+    .card {
+        background: linear-gradient(145deg, #1E293B, #162032);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 16px;
+        padding: 28px;
+        height: 100%;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        transition: all 0.2s ease;
+    }
+    .card:hover {
+        border-color: rgba(99, 102, 241, 0.3);
+        box-shadow: 0 12px 40px rgba(0,0,0,0.4);
+    }
+    .card-title {
+        font-size: 1rem;
+        font-weight: 700;
+        color: #E2E8F0;
+        margin: 0 0 6px 0;
+        display: flex;
+        align-items: center;
         gap: 8px;
     }
+    .card-subtitle {
+        font-size: 0.82rem;
+        color: #64748B;
+        margin: 0 0 20px 0;
+        line-height: 1.5;
+    }
+
+    /* === ЗОНА ЗАГРУЗКИ (Upload) === */
+    [data-testid="stFileUploaderDropzone"] {
+        background: linear-gradient(145deg, rgba(30,58,138,0.15), rgba(37,99,235,0.08)) !important;
+        border: 2px dashed rgba(99,102,241,0.4) !important;
+        border-radius: 14px !important;
+        transition: all 0.25s ease !important;
+        padding: 28px !important;
+    }
+    [data-testid="stFileUploaderDropzone"]:hover {
+        background: linear-gradient(145deg, rgba(30,58,138,0.25), rgba(37,99,235,0.15)) !important;
+        border-color: rgba(99,102,241,0.7) !important;
+    }
+    [data-testid="stFileUploaderDropzone"] > div > span {
+        color: #94A3B8 !important;
+        font-size: 0.9rem !important;
+    }
+
+    /* === КНОПКИ === */
+    .stButton > button {
+        border-radius: 12px !important;
+        font-weight: 600 !important;
+        letter-spacing: 0.2px !important;
+        transition: all 0.2s ease !important;
+        border: none !important;
+    }
+    .stButton > button[kind="primary"] {
+        background: linear-gradient(135deg, #2563EB, #4F46E5) !important;
+        color: white !important;
+        padding: 14px 28px !important;
+        font-size: 1rem !important;
+        box-shadow: 0 8px 25px rgba(79, 70, 229, 0.4) !important;
+    }
+    .stButton > button[kind="primary"]:hover {
+        transform: translateY(-2px) !important;
+        box-shadow: 0 12px 35px rgba(79, 70, 229, 0.55) !important;
+    }
+    .stButton > button[kind="primary"]:disabled {
+        opacity: 0.4 !important;
+        transform: none !important;
+    }
+    .stButton > button[kind="secondary"] {
+        background: rgba(99,102,241,0.12) !important;
+        color: #A5B4FC !important;
+        border: 1px solid rgba(99,102,241,0.25) !important;
+    }
+
+    /* === МЕТРИКИ KPI === */
+    .kpi-card {
+        background: linear-gradient(145deg, #1E293B, #162032);
+        border: 1px solid rgba(255,255,255,0.07);
+        border-radius: 16px;
+        padding: 22px 24px;
+        text-align: center;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.25);
+        position: relative;
+        overflow: hidden;
+    }
+    .kpi-card::before {
+        content: "";
+        position: absolute;
+        top: 0; left: 0; right: 0;
+        height: 3px;
+    }
+    .kpi-blue::before { background: linear-gradient(90deg, #3B82F6, #6366F1); }
+    .kpi-green::before { background: linear-gradient(90deg, #10B981, #34D399); }
+    .kpi-red::before { background: linear-gradient(90deg, #EF4444, #F97316); }
+    .kpi-yellow::before { background: linear-gradient(90deg, #F59E0B, #EF4444); }
+
+    .kpi-label {
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        color: #475569;
+        margin-bottom: 8px;
+    }
+    .kpi-value {
+        font-size: 2.2rem;
+        font-weight: 800;
+        line-height: 1;
+        margin-bottom: 6px;
+    }
+    .kpi-blue .kpi-value { color: #60A5FA; }
+    .kpi-green .kpi-value { color: #34D399; }
+    .kpi-red .kpi-value { color: #F87171; }
+    .kpi-yellow .kpi-value { color: #FBBF24; }
+    .kpi-caption {
+        font-size: 0.78rem;
+        color: #475569;
+    }
+
+    /* === СТАТУС БЕЙДЖИ === */
+    .badge-green {
+        background: rgba(16,185,129,0.15);
+        color: #34D399;
+        border: 1px solid rgba(16,185,129,0.3);
+        border-radius: 20px;
+        padding: 3px 10px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        white-space: nowrap;
+    }
+    .badge-red {
+        background: rgba(239,68,68,0.15);
+        color: #F87171;
+        border: 1px solid rgba(239,68,68,0.3);
+        border-radius: 20px;
+        padding: 3px 10px;
+        font-size: 0.78rem;
+        font-weight: 600;
+    }
+    .badge-blue {
+        background: rgba(59,130,246,0.15);
+        color: #60A5FA;
+        border: 1px solid rgba(59,130,246,0.3);
+        border-radius: 20px;
+        padding: 3px 10px;
+        font-size: 0.78rem;
+        font-weight: 600;
+    }
+    .badge-yellow {
+        background: rgba(245,158,11,0.15);
+        color: #FBBF24;
+        border: 1px solid rgba(245,158,11,0.3);
+        border-radius: 20px;
+        padding: 3px 10px;
+        font-size: 0.78rem;
+        font-weight: 600;
+    }
+
+    /* === ТАБЛИЦА === */
+    .stDataFrame {
+        border-radius: 14px !important;
+        overflow: hidden !important;
+        border: 1px solid rgba(255,255,255,0.07) !important;
+    }
+    [data-testid="stDataFrameResizable"] {
+        border-radius: 14px !important;
+    }
+
+    /* === ПРОГРЕСС БАР === */
+    .stProgress > div > div > div {
+        background: linear-gradient(90deg, #3B82F6, #6366F1) !important;
+        border-radius: 10px !important;
+    }
+
+    /* === ВКЛАДКИ === */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 4px;
+        background: rgba(255,255,255,0.04) !important;
+        border-radius: 14px;
+        padding: 4px !important;
+        border: 1px solid rgba(255,255,255,0.07) !important;
+    }
     .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        white-space: pre-wrap;
-        background-color: #F1F5F9;
-        border-radius: 6px 6px 0px 0px;
-        padding-top: 10px;
-        padding-bottom: 10px;
-        font-weight: 500;
+        border-radius: 10px !important;
+        padding: 10px 20px !important;
+        font-weight: 600 !important;
+        font-size: 0.9rem !important;
+        color: #64748B !important;
+        background: transparent !important;
+        transition: all 0.2s ease !important;
     }
     .stTabs [aria-selected="true"] {
-        background-color: #1E3A8A !important;
+        background: linear-gradient(135deg, #2563EB, #4F46E5) !important;
         color: white !important;
+        box-shadow: 0 4px 15px rgba(79,70,229,0.35) !important;
+    }
+
+    /* === DIVIDER === */
+    hr {
+        border: none !important;
+        border-top: 1px solid rgba(255,255,255,0.06) !important;
+        margin: 24px 0 !important;
+    }
+
+    /* === EXPANDER === */
+    .streamlit-expanderHeader {
+        background: rgba(255,255,255,0.04) !important;
+        border-radius: 10px !important;
+        color: #94A3B8 !important;
+        font-weight: 600 !important;
+    }
+
+    /* === ПРОГРЕСС СТАТУС === */
+    .status-block {
+        background: linear-gradient(145deg, rgba(30,58,138,0.2), rgba(37,99,235,0.1));
+        border: 1px solid rgba(99,102,241,0.2);
+        border-radius: 14px;
+        padding: 20px 24px;
+        margin: 16px 0;
+    }
+
+    /* === SUCCESS BLOCK === */
+    .success-block {
+        background: linear-gradient(145deg, rgba(16,185,129,0.15), rgba(5,150,105,0.08));
+        border: 1px solid rgba(16,185,129,0.3);
+        border-radius: 14px;
+        padding: 20px 24px;
+        margin: 16px 0;
+    }
+
+    /* Скрытие sidebar */
+    [data-testid="stSidebar"], [data-testid="stSidebarNav"] { display: none !important; }
+
+    /* Скрытие лишних элементов Streamlit */
+    #MainMenu, footer, header { visibility: hidden; }
+    .block-container { padding-top: 24px !important; max-width: 1400px !important; }
+    
+    /* Текстовые элементы */
+    p, li, span { color: #94A3B8 !important; }
+    h1, h2, h3, h4, h5, h6 { color: #E2E8F0 !important; }
+    
+    /* selectbox, text_input */
+    [data-baseweb="select"] {
+        background: rgba(255,255,255,0.06) !important;
+        border-radius: 10px !important;
+    }
+    [data-baseweb="input"] > div {
+        background: rgba(255,255,255,0.06) !important;
+        border-radius: 10px !important;
+    }
+    
+    /* download button */
+    .stDownloadButton > button {
+        border-radius: 12px !important;
+        font-weight: 700 !important;
+        background: linear-gradient(135deg, #059669, #10B981) !important;
+        color: white !important;
+        border: none !important;
+        font-size: 1rem !important;
+        padding: 14px 28px !important;
+        box-shadow: 0 8px 25px rgba(16,185,129,0.35) !important;
+        transition: all 0.2s ease !important;
+    }
+    .stDownloadButton > button:hover {
+        transform: translateY(-2px) !important;
+        box-shadow: 0 12px 35px rgba(16,185,129,0.5) !important;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Инициализация session_state
-if "catalog_df" not in st.session_state:
-    default_cat_path = "data/samples/samberi_catalog_sample.xlsx"
-    if os.path.exists(default_cat_path):
-        st.session_state.catalog_df = pd.read_excel(default_cat_path)
-    else:
-        st.session_state.catalog_df = pd.DataFrame()
+# ==========================================
+# HERO HEADER
+# ==========================================
+st.markdown("""
+<div class="hero-block">
+    <div class="hero-badge">🤖 Google Gemini 1.5 Flash • Vision AI</div>
+    <div class="hero-title">🛒 Самбери: Мониторинг ценников</div>
+    <div class="hero-subtitle">Автоматическое распознавание ценников конкурентов • Сопоставление с базой Самбери • Price Index в реальном времени</div>
+</div>
+""", unsafe_allow_html=True)
 
-if "processed_results" not in st.session_state:
-    st.session_state.processed_results = []
+# Session state
+for key in ["catalog_df", "processed_results", "uploaded_images_cache"]:
+    if key not in st.session_state:
+        default = pd.DataFrame() if key == "catalog_df" else ([] if key == "processed_results" else {})
+        if key == "catalog_df":
+            p = "data/samples/samberi_catalog_sample.xlsx"
+            st.session_state.catalog_df = pd.read_excel(p) if os.path.exists(p) else pd.DataFrame()
+        else:
+            st.session_state[key] = default
 
-if "uploaded_images_cache" not in st.session_state:
-    st.session_state.uploaded_images_cache = {}
-
-# --- Заголовок приложения ---
-st.markdown('<div class="main-title">🛒 Самбери: Мониторинг и анализ ценников</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Автоматическое распознавание ценников через Google Gemini AI, сопоставление с номенклатурой Самбери и расчет Price Index</div>', unsafe_allow_html=True)
-
-# 4 основные вкладки приложения
-tab_upload, tab_table, tab_dashboard, tab_export = st.tabs([
-    "📸 1. Загрузка и анализ фото",
-    "📋 2. Сравнительная таблица",
-    "📊 3. Аналитика и Price Index",
-    "📥 4. Экспорт в Excel"
+# ==========================================
+# ВКЛАДКИ
+# ==========================================
+tab1, tab2, tab3, tab4 = st.tabs([
+    "  📸  Загрузка и анализ",
+    "  📋  Сравнительная таблица",
+    "  📊  Аналитика",
+    "  📥  Выгрузка Excel"
 ])
 
 
-# ==========================================
-# ВКЛАДКА 1: ЗАГРУЗКА И АНАЛИЗ ФОТО
-# ==========================================
-with tab_upload:
-    col_cat, col_photos = st.columns([1, 1], gap="large")
+# ─────────────────────────────────────────
+# ВКЛАДКА 1: ЗАГРУЗКА
+# ─────────────────────────────────────────
+with tab1:
+    col_left, col_right = st.columns(2, gap="large")
 
-    with col_cat:
-        st.markdown("#### 1. Справочник цен Самбери")
-        st.caption("Загрузите Excel с базой Самбери или используйте встроенный каталог.")
+    # ── Левая колонка: Каталог Самбери ──
+    with col_left:
+        st.markdown("""
+        <div class="card">
+            <div class="card-title">📂 Справочник цен Самбери</div>
+            <div class="card-subtitle">Загрузите Excel/CSV с базой Самбери — программа автоматически найдет столбцы с кодом, наименованием и ценами.</div>
+        </div>
+        """, unsafe_allow_html=True)
         
-        uploaded_catalog_file = st.file_uploader(
-            "Загрузить файл каталога Самбери (.xlsx / .csv)",
+        uploaded_catalog = st.file_uploader(
+            "Перетащите файл или нажмите для выбора",
             type=["xlsx", "xls", "csv"],
-            key="catalog_uploader"
+            key="catalog_uploader",
+            label_visibility="collapsed"
         )
-        
-        if uploaded_catalog_file is not None:
-            try:
-                if uploaded_catalog_file.name.endswith(".csv"):
-                    st.session_state.catalog_df = pd.read_csv(uploaded_catalog_file)
-                else:
-                    st.session_state.catalog_df = pd.read_excel(uploaded_catalog_file)
-                st.success(f"Загружен каталог: {len(st.session_state.catalog_df)} позиций")
-            except Exception as e:
-                st.error(f"Ошибка загрузки каталога: {e}")
 
-        # Показываем предпросмотр каталога
+        if uploaded_catalog:
+            try:
+                df = pd.read_csv(uploaded_catalog) if uploaded_catalog.name.endswith(".csv") else pd.read_excel(uploaded_catalog)
+                st.session_state.catalog_df = df
+                st.success(f"✅ Загружено **{len(df)} SKU** из файла «{uploaded_catalog.name}»")
+            except Exception as e:
+                st.error(f"Ошибка загрузки: {e}")
+
         if not st.session_state.catalog_df.empty:
-            with st.expander(f"👁️ Предпросмотр каталога Самбери ({len(st.session_state.catalog_df)} SKU)", expanded=False):
-                st.dataframe(st.session_state.catalog_df.head(10), use_container_width=True)
+            sku_count = len(st.session_state.catalog_df)
+            st.markdown(f"""
+            <div style="display:flex;align-items:center;gap:10px;margin:12px 0 4px 0;">
+                <span style="font-size:1.5rem;">📦</span>
+                <div>
+                    <div style="color:#34D399;font-weight:700;font-size:1.1rem;">{sku_count} SKU загружено</div>
+                    <div style="color:#475569;font-size:0.8rem;">База номенклатуры Самбери готова к матчингу</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            with st.expander("👁️ Предпросмотр базы Самбери", expanded=False):
+                st.dataframe(
+                    st.session_state.catalog_df.head(8),
+                    use_container_width=True,
+                    hide_index=True
+                )
         else:
-            st.warning("⚠️ Каталог Самбери не загружен. Нажмите кнопку ниже для создания образца.")
-            if st.button("📦 Использовать демо-каталог Самбери"):
+            st.markdown("""
+            <div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);
+                        border-radius:12px;padding:16px;margin-top:12px;">
+                <div style="color:#FBBF24;font-weight:600;margin-bottom:4px;">⚠️ База Самбери не загружена</div>
+                <div style="color:#64748B;font-size:0.83rem;">Загрузите файл или используйте демо-каталог</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if st.button("📦 Загрузить демо-каталог Самбери (12 SKU)", use_container_width=True):
                 from data.samples.generate_sample_data import generate_samples
-                sample_file = generate_samples()
-                st.session_state.catalog_df = pd.read_excel(sample_file)
+                st.session_state.catalog_df = pd.read_excel(generate_samples())
                 st.rerun()
 
-    with col_photos:
-        st.markdown("#### 2. Фотографии ценников")
-        st.caption("Загрузите до 100+ фото ценников (JPG, PNG) или ZIP-архив с фото.")
-        
+    # ── Правая колонка: Фото ценников ──
+    with col_right:
+        st.markdown("""
+        <div class="card">
+            <div class="card-title">📸 Фотографии ценников конкурента</div>
+            <div class="card-subtitle">Загружайте JPG/PNG фотографии ценников любым способом — по одной или целую папку в ZIP. Поддерживается до 100+ фото за один раз.</div>
+        </div>
+        """, unsafe_allow_html=True)
+
         uploaded_photos = st.file_uploader(
-            "Перетащите фото ценников сюда",
+            "Перетащите фото ценников или ZIP-архив сюда",
             type=["jpg", "jpeg", "png", "zip"],
             accept_multiple_files=True,
-            key="photos_uploader"
+            key="photos_uploader",
+            label_visibility="collapsed"
         )
+
+        if uploaded_photos:
+            photo_count = len(uploaded_photos)
+            has_zip = any(f.name.lower().endswith(".zip") for f in uploaded_photos)
+            st.markdown(f"""
+            <div style="display:flex;align-items:center;gap:10px;margin:12px 0 4px 0;">
+                <span style="font-size:1.5rem;">✅</span>
+                <div>
+                    <div style="color:#34D399;font-weight:700;font-size:1.1rem;">
+                        {"ZIP-архив с фото" if has_zip else f"{photo_count} фото выбрано"}
+                    </div>
+                    <div style="color:#475569;font-size:0.8rem;">Готово к распознаванию через Google Gemini</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
         
-        demo_btn = st.button("🧪 Загрузить 10 тестовых ценников для демо-проверки")
+        demo_btn = st.button("🧪 Использовать демо-набор (10 тестовых ценников)", use_container_width=True, key="demo_btn")
 
-    st.divider()
-
-    # Кнопка запуска обработки
-    run_disabled = (not uploaded_photos and not demo_btn) or (st.session_state.catalog_df.empty)
+    # ── Панель запуска ──
+    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
     
-    if st.button("🚀 НАЧАТЬ РАСПОЗНАВАНИЕ И РАСЧЕТ", type="primary", use_container_width=True, disabled=run_disabled):
+    has_photos = bool(uploaded_photos or demo_btn)
+    has_catalog = not st.session_state.catalog_df.empty
+    ready_to_run = has_photos and has_catalog
+
+    if not has_catalog:
+        st.markdown("""
+        <div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);
+                    border-radius:12px;padding:14px 18px;text-align:center;margin-bottom:8px;">
+            <span style="color:#F87171;font-weight:600;">⚠️ Необходимо загрузить базу Самбери для запуска</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+    run_btn = st.button(
+        "🚀  НАЧАТЬ РАСПОЗНАВАНИЕ И РАСЧЁТ PRICE INDEX",
+        type="primary",
+        use_container_width=True,
+        disabled=not ready_to_run
+    )
+
+    if run_btn:
         images_to_process = []
-        
-        if demo_btn or (uploaded_photos and len(uploaded_photos) == 0):
+
+        if demo_btn or not uploaded_photos:
             demo_names = [
-                "tag_moloko_domik_3_2.jpg", "tag_maslo_prostokvashino_82.jpg", "tag_syr_brest_45.jpg",
-                "tag_grechka_uvelka.jpg", "tag_makarony_makfa.jpg", "tag_kolbasa_vyazanka.jpg",
-                "tag_tea_greenfield_100.jpg", "tag_coffee_nescafe_190.jpg", "tag_choc_ritter_sport.jpg",
+                "tag_moloko_domik_3_2.jpg","tag_maslo_prostokvashino.jpg","tag_syr_brest_45.jpg",
+                "tag_grechka_uvelka.jpg","tag_makarony_makfa.jpg","tag_kolbasa_vyazanka.jpg",
+                "tag_tea_greenfield.jpg","tag_coffee_nescafe.jpg","tag_shokolad_ritter.jpg",
                 "tag_sok_dobry_apple.jpg"
             ]
-            for name in demo_names:
-                images_to_process.append({
-                    "data": b"sample_mock_bytes",
-                    "filename": name,
-                    "mime": "image/jpeg"
-                })
+            for n in demo_names:
+                images_to_process.append({"data": b"mock", "filename": n, "mime": "image/jpeg"})
         else:
             for f in uploaded_photos:
                 if f.name.lower().endswith(".zip"):
                     try:
                         with zipfile.ZipFile(f) as z:
-                            for zip_info in z.infolist():
-                                if not zip_info.is_dir() and any(zip_info.filename.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png"]):
-                                    img_data = z.read(zip_info.filename)
-                                    clean_name = os.path.basename(zip_info.filename)
-                                    images_to_process.append({"data": img_data, "filename": clean_name, "mime": "image/jpeg"})
-                                    st.session_state.uploaded_images_cache[clean_name] = img_data
+                            for zi in z.infolist():
+                                if not zi.is_dir() and any(zi.filename.lower().endswith(e) for e in [".jpg",".jpeg",".png"]):
+                                    d = z.read(zi.filename)
+                                    n = os.path.basename(zi.filename)
+                                    images_to_process.append({"data": d, "filename": n, "mime": "image/jpeg"})
+                                    st.session_state.uploaded_images_cache[n] = d
                     except Exception as e:
-                        st.error(f"Ошибка чтения ZIP {f.name}: {e}")
+                        st.error(f"Ошибка ZIP: {e}")
                 else:
-                    img_data = f.read()
-                    images_to_process.append({"data": img_data, "filename": f.name, "mime": f.type or "image/jpeg"})
-                    st.session_state.uploaded_images_cache[f.name] = img_data
+                    d = f.read()
+                    images_to_process.append({"data": d, "filename": f.name, "mime": f.type or "image/jpeg"})
+                    st.session_state.uploaded_images_cache[f.name] = d
 
         if not images_to_process:
-            st.error("Не найдено подходящих фотографий для обработки.")
+            st.error("Не найдено подходящих фотографий.")
         else:
-            total_imgs = len(images_to_process)
+            total = len(images_to_process)
+            
+            status_box = st.empty()
             progress_bar = st.progress(0.0)
-            status_text = st.empty()
-            start_time = time.time()
+            detail_text = st.empty()
 
-            extractor = PriceTagExtractor(
-                provider="gemini",
-                api_key=DEFAULT_GEMINI_KEY
-            )
-            
-            def progress_callback(completed, total, latest_res):
-                progress = completed / total
-                progress_bar.progress(progress)
-                status_text.text(f"Распознавание Google Gemini: {completed}/{total} фото... (последнее: {latest_res.get('product_name', '')[:40]})")
+            status_box.markdown(f"""
+            <div class="status-block">
+                <div style="color:#60A5FA;font-weight:700;font-size:1rem;margin-bottom:4px;">
+                    ⚡ Запуск Google Gemini Vision AI
+                </div>
+                <div style="color:#475569;font-size:0.87rem;">Отправляю {total} фотографий на параллельное распознавание...</div>
+            </div>
+            """, unsafe_allow_html=True)
 
-            # 1. Распознавание ценников через Google Gemini
-            recognized_items = extractor.extract_batch(
-                images_to_process,
-                max_workers=8,
-                on_progress=progress_callback
-            )
-            
-            elapsed_vision = round(time.time() - start_time, 1)
-            status_text.text(f"Матчинг номенклатуры с базой Самбери (порог точности {int(MATCH_THRESHOLD)}%)...")
+            t0 = time.time()
+            extractor = PriceTagExtractor(provider="gemini", api_key=DEFAULT_GEMINI_KEY)
 
-            # 2. Нечеткий матчинг с фиксированным порогом 90%
+            def on_progress(done, total_n, last_res):
+                pct = done / total_n
+                progress_bar.progress(pct)
+                name = last_res.get("product_name", "")[:45]
+                status_box.markdown(f"""
+                <div class="status-block">
+                    <div style="color:#60A5FA;font-weight:700;font-size:1rem;margin-bottom:4px;">
+                        ⚡ Распознавание: {done} / {total_n} ценников
+                    </div>
+                    <div style="color:#475569;font-size:0.87rem;">Последнее: {name}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            recognized = extractor.extract_batch(images_to_process, max_workers=8, on_progress=on_progress)
+            t_vision = round(time.time() - t0, 1)
+
+            detail_text.markdown(f"""
+            <div style="color:#475569;font-size:0.82rem;margin:4px 0 12px 0;">
+                🔗 Матчинг с базой Самбери (порог точности {int(MATCH_THRESHOLD)}%)...
+            </div>""", unsafe_allow_html=True)
+
             matcher = CatalogMatcher(st.session_state.catalog_df)
-            matched_items = []
-            for item in recognized_items:
-                rec_name = item.get("product_name", "")
-                match_info = matcher.match_item(rec_name, threshold=MATCH_THRESHOLD)
-                matched_items.append({**item, **match_info})
+            matched = []
+            for item in recognized:
+                mi = matcher.match_item(item.get("product_name", ""), threshold=MATCH_THRESHOLD)
+                matched.append({**item, **mi})
 
-            # 3. Расчет Price Index и аналитики
-            final_processed = [calculate_price_metrics(it) for it in matched_items]
-            st.session_state.processed_results = final_processed
-            
+            processed = [calculate_price_metrics(it) for it in matched]
+            st.session_state.processed_results = processed
+
             progress_bar.progress(1.0)
-            status_text.success(f" Обработка завершена! {total_imgs} ценников обработано за {elapsed_vision} сек. Перейдите во вкладку '2. Сравнительная таблица'.")
+            matched_count = sum(1 for r in processed if r.get("matched_sku"))
+            status_box.markdown(f"""
+            <div class="success-block">
+                <div style="color:#34D399;font-weight:800;font-size:1.15rem;margin-bottom:8px;">
+                    🎉 Анализ завершён за {t_vision} сек.
+                </div>
+                <div style="display:flex;gap:24px;flex-wrap:wrap;">
+                    <div>
+                        <span style="color:#34D399;font-weight:700;">{total}</span>
+                        <span style="color:#475569;font-size:0.85rem;"> ценников распознано</span>
+                    </div>
+                    <div>
+                        <span style="color:#60A5FA;font-weight:700;">{matched_count}</span>
+                        <span style="color:#475569;font-size:0.85rem;"> позиций сопоставлено с базой Самбери</span>
+                    </div>
+                </div>
+                <div style="color:#475569;font-size:0.83rem;margin-top:8px;">
+                    ➡️ Перейдите во вкладку «Сравнительная таблица» или «Аналитика»
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            detail_text.empty()
             st.balloons()
 
 
-# ==========================================
-# ВКЛАДКА 2: СРАВНИТЕЛЬНАЯ ТАБЛИЦА
-# ==========================================
-with tab_table:
+# ─────────────────────────────────────────
+# ВКЛАДКА 2: ТАБЛИЦА
+# ─────────────────────────────────────────
+with tab2:
     if not st.session_state.processed_results:
-        st.info("💡 Нет данных для отображения. Загрузите фото и нажмите 'Начать распознавание' во вкладке 1.")
+        st.markdown("""
+        <div style="text-align:center;padding:60px 20px;">
+            <div style="font-size:4rem;margin-bottom:16px;">📋</div>
+            <div style="color:#E2E8F0;font-size:1.3rem;font-weight:700;margin-bottom:8px;">Нет данных для отображения</div>
+            <div style="color:#475569;font-size:0.95rem;">Загрузите базу Самбери и фото ценников, затем нажмите «Начать распознавание»</div>
+        </div>
+        """, unsafe_allow_html=True)
     else:
         results = st.session_state.processed_results
-        
+
         # Фильтры
-        col_f1, col_f2, col_f3 = st.columns([1.5, 1.5, 1])
-        with col_f1:
+        fcol1, fcol2, fcol3, fcol4 = st.columns([2, 2, 1, 1])
+        with fcol1:
             status_filter = st.selectbox(
-                "Фильтр по статусу ценообразования:",
-                ["Все статусы", "✅ Самбери дешевле", "❌ Конкурент дешевле", "⚖️ Паритет цен (±2%)", "⚠️ Только ДЕМПИНГ конкурента"]
+                "Фильтр по статусу",
+                ["🔍 Все статусы", "✅ Самбери дешевле", "❌ Конкурент дешевле", "⚖️ Паритет цен (±2%)", "⚠️ Только ДЕМПИНГ"],
+                label_visibility="collapsed"
             )
-        with col_f2:
-            search_query = st.text_input("🔍 Поиск по названию товара:", "")
-        with col_f3:
-            st.metric("Всего позиций", len(results))
+        with fcol2:
+            search_q = st.text_input("Поиск по наименованию...", label_visibility="collapsed", placeholder="🔍 Поиск по наименованию...")
+        with fcol3:
+            st.markdown(f"""
+            <div style="text-align:center;background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.2);
+                        border-radius:10px;padding:9px 4px;">
+                <div style="color:#A5B4FC;font-weight:800;font-size:1.4rem;line-height:1;">{len(results)}</div>
+                <div style="color:#475569;font-size:0.7rem;margin-top:2px;">позиций</div>
+            </div>""", unsafe_allow_html=True)
+        with fcol4:
+            matched_n = sum(1 for r in results if r.get("matched_sku"))
+            st.markdown(f"""
+            <div style="text-align:center;background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.2);
+                        border-radius:10px;padding:9px 4px;">
+                <div style="color:#34D399;font-weight:800;font-size:1.4rem;line-height:1;">{matched_n}</div>
+                <div style="color:#475569;font-size:0.7rem;margin-top:2px;">матчей</div>
+            </div>""", unsafe_allow_html=True)
 
-        # Формируем таблицу со строгой структурой колонок пользователя
-        table_rows = []
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+        rows = []
         for r in results:
-            if status_filter == "✅ Самбери дешевле" and r.get("status") != "✅ Самбери дешевле":
-                continue
-            if status_filter == "❌ Конкурент дешевле" and r.get("status") != "❌ Конкурент дешевле":
-                continue
-            if status_filter == "⚖️ Паритет цен (±2%)" and r.get("status") != "⚖️ Паритет цен (±2%)":
-                continue
-            if status_filter == "⚠️ Только ДЕМПИНГ конкурента" and not r.get("alert"):
-                continue
+            st_val = r.get("status", "")
+            if "Самбери дешевле" in status_filter and "Самбери" not in st_val: continue
+            if "Конкурент дешевле" in status_filter and "Конкурент" not in st_val: continue
+            if "Паритет" in status_filter and "Паритет" not in st_val: continue
+            if "ДЕМПИНГ" in status_filter and not r.get("alert"): continue
 
-            if search_query:
-                q = search_query.lower()
-                prod_name = (r.get("matched_name") or "").lower()
-                rec_name = (r.get("product_name") or "").lower()
-                if q not in prod_name and q not in rec_name:
-                    continue
+            if search_q:
+                q = search_q.lower()
+                n1 = (r.get("matched_name") or "").lower()
+                n2 = (r.get("product_name") or "").lower()
+                if q not in n1 and q not in n2: continue
 
-            table_rows.append({
-                "Код нашего товара": r.get("matched_sku") or "-",
-                "Наименование товара": r.get("matched_name") or r.get("product_name", ""),
-                "Цена закупки товара": r.get("our_purchase_price"),
-                "Цена продажи товара": r.get("our_sale_price"),
-                "Цена на промо у товара": r.get("our_promo_price"),
-                "Текущая цена конкурента этого товара": r.get("comp_regular_price"),
-                "Цена на промо у конкурента": r.get("comp_promo_price"),
-                "Разница цен": r.get("effective_diff_rub"),
-                "Price Index (%)": r.get("price_index_effective"),
-                "Статус выгодности": r.get("status"),
-                "Предупреждения": r.get("alert") or "",
+            rows.append({
+                "Код товара": r.get("matched_sku") or "—",
+                "Наименование товара (Самбери)": r.get("matched_name") or r.get("product_name", ""),
                 "Распознано с ценника": r.get("product_name", ""),
-                "Файл фото": r.get("filename", "")
+                "Цена закупки ₽": r.get("our_purchase_price"),
+                "Цена продажи ₽": r.get("our_sale_price"),
+                "Промо Самбери ₽": r.get("our_promo_price"),
+                "Цена конкурента ₽": r.get("comp_regular_price"),
+                "Промо конкурента ₽": r.get("comp_promo_price"),
+                "Разница ₽": r.get("effective_diff_rub"),
+                "PI %": r.get("price_index_effective"),
+                "Статус": st_val,
+                "Предупреждения": r.get("alert") or "",
+                "Файл": r.get("filename", "")
             })
 
-        display_df = pd.DataFrame(table_rows)
+        df_disp = pd.DataFrame(rows)
 
-        if display_df.empty:
-            st.warning("По выбранным фильтрам позиции не найдены.")
+        if df_disp.empty:
+            st.warning("По выбранным фильтрам позиций не найдено.")
         else:
-            column_config = {
-                "Код нашего товара": st.column_config.TextColumn("Код нашего товара", width="small"),
-                "Наименование товара": st.column_config.TextColumn("Наименование товара", width="large"),
-                "Цена закупки товара": st.column_config.NumberColumn("Цена закупки товара", format="%.2f ₽"),
-                "Цена продажи товара": st.column_config.NumberColumn("Цена продажи товара", format="%.2f ₽"),
-                "Цена на промо у товара": st.column_config.NumberColumn("Цена на промо у товара", format="%.2f ₽"),
-                "Текущая цена конкурента этого товара": st.column_config.NumberColumn("Текущая цена конкурента", format="%.2f ₽"),
-                "Цена на промо у конкурента": st.column_config.NumberColumn("Цена на промо у конкурента", format="%.2f ₽"),
-                "Разница цен": st.column_config.NumberColumn("Разница цен", format="%.2f ₽"),
-                "Price Index (%)": st.column_config.NumberColumn("Price Index", format="%.1f%%"),
-                "Статус выгодности": st.column_config.TextColumn("Статус выгодности", width="medium"),
-                "Предупреждения": st.column_config.TextColumn("Предупреждения", width="medium"),
+            col_cfg = {
+                "Код товара": st.column_config.TextColumn("Код товара", width=100),
+                "Наименование товара (Самбери)": st.column_config.TextColumn("Наименование (Самбери)", width=250),
+                "Распознано с ценника": st.column_config.TextColumn("С ценника", width=180),
+                "Цена закупки ₽": st.column_config.NumberColumn("Закупка ₽", format="%.2f"),
+                "Цена продажи ₽": st.column_config.NumberColumn("Продажа ₽", format="%.2f"),
+                "Промо Самбери ₽": st.column_config.NumberColumn("Промо Смб ₽", format="%.2f"),
+                "Цена конкурента ₽": st.column_config.NumberColumn("Цена конк. ₽", format="%.2f"),
+                "Промо конкурента ₽": st.column_config.NumberColumn("Промо конк. ₽", format="%.2f"),
+                "Разница ₽": st.column_config.NumberColumn("Разница ₽", format="%.2f"),
+                "PI %": st.column_config.NumberColumn("PI %", format="%.1f%%"),
+                "Статус": st.column_config.TextColumn("Статус", width=160),
+                "Предупреждения": st.column_config.TextColumn("Предупреждения", width=200),
+                "Файл": st.column_config.TextColumn("Файл", width=140),
             }
+            st.dataframe(df_disp, column_config=col_cfg, use_container_width=True, height=500, hide_index=True)
 
-            st.dataframe(
-                display_df,
-                column_config=column_config,
-                use_container_width=True,
-                height=450
-            )
+        # ── Детальный просмотр ──
+        st.markdown("<hr>", unsafe_allow_html=True)
+        st.markdown("""<div style="color:#E2E8F0;font-weight:700;font-size:1.05rem;margin-bottom:12px;">
+            🔍 Детальный просмотр и корректировка матчинга</div>""", unsafe_allow_html=True)
 
-        st.divider()
+        fnames = [r.get("filename") for r in results if r.get("filename")]
+        selected_file = st.selectbox("Выберите ценник:", fnames, label_visibility="collapsed")
+        target = next((r for r in results if r.get("filename") == selected_file), None)
 
-        # Детальный просмотр и сверка
-        st.markdown("#### 🔍 Детальный просмотр ценника и корректировка")
-        selected_file = st.selectbox(
-            "Выберите ценник для проверки:",
-            [r.get("filename") for r in results]
-        )
-        
-        target_item = next((r for r in results if r.get("filename") == selected_file), None)
-        
-        if target_item:
-            c_img, c_details = st.columns([1, 2], gap="large")
-            with c_img:
+        if target:
+            di1, di2 = st.columns([1, 2], gap="large")
+            with di1:
                 img_bytes = st.session_state.uploaded_images_cache.get(selected_file)
                 if img_bytes:
-                    st.image(img_bytes, caption=f"Фото: {selected_file}", use_container_width=True)
+                    st.image(img_bytes, use_container_width=True,
+                             caption=f"📸 {selected_file}")
                 else:
-                    st.info(f"🖼️ [Превью ценника: {selected_file}]")
-                    st.caption(f"Распознано: {target_item.get('product_name')}")
-            
-            with c_details:
-                st.markdown(f"**Распознанный товар:** `{target_item.get('product_name')}`")
-                st.markdown(f"**Бренд:** `{target_item.get('brand') or '-'}` | **Фасовка:** `{target_item.get('weight_volume') or '-'}`")
-                st.markdown(f"**Регулярная цена конкурента:** `{target_item.get('comp_regular_price')} ₽`")
-                if target_item.get("comp_promo_price"):
-                    st.markdown(f"**Промо цена конкурента:** `{target_item.get('comp_promo_price')} ₽` ({target_item.get('promo_condition') or 'акция'})")
-                
-                st.divider()
-                st.markdown("**Сопоставление с каталогом Самбери:**")
-                candidates = target_item.get("candidates", [])
-                if candidates:
-                    candidate_options = [f"{c['sku']} — {c['name']} (Совпадение: {c['score']}%)" for c in candidates]
-                    current_idx = 0
-                    sel_candidate_str = st.selectbox(
-                        "Выбрать правильный SKU Самбери:",
-                        candidate_options,
-                        index=current_idx
-                    )
-                    if st.button("Применить выбранный SKU к этой строке"):
-                        chosen_sku = sel_candidate_str.split(" — ")[0]
-                        chosen_cand = next((c for c in candidates if str(c['sku']) == chosen_sku), None)
-                        if chosen_cand:
-                            target_item["matched_sku"] = chosen_cand["sku"]
-                            target_item["matched_name"] = chosen_cand["name"]
-                            target_item["our_purchase_price"] = chosen_cand["purchase_price"]
-                            target_item["our_sale_price"] = chosen_cand["sale_price"]
-                            target_item["our_promo_price"] = chosen_cand["promo_price"]
-                            updated = calculate_price_metrics(target_item)
-                            for k, v in updated.items():
-                                target_item[k] = v
-                            st.success(f"Привязан SKU {chosen_sku}!")
+                    st.markdown(f"""
+                    <div style="background:rgba(255,255,255,0.04);border:1px dashed rgba(255,255,255,0.1);
+                                border-radius:12px;padding:40px;text-align:center;">
+                        <div style="font-size:3rem;">🖼️</div>
+                        <div style="color:#475569;font-size:0.85rem;margin-top:8px;">{selected_file}</div>
+                    </div>""", unsafe_allow_html=True)
+
+            with di2:
+                # Распознанная информация
+                conf = target.get("confidence", 0)
+                conf_color = "#34D399" if conf >= 0.9 else ("#FBBF24" if conf >= 0.7 else "#F87171")
+                st.markdown(f"""
+                <div style="background:rgba(255,255,255,0.04);border-radius:12px;padding:18px;margin-bottom:16px;">
+                    <div style="color:#64748B;font-size:0.75rem;font-weight:600;text-transform:uppercase;
+                                letter-spacing:1px;margin-bottom:10px;">Распознано с ценника</div>
+                    <div style="color:#E2E8F0;font-weight:700;font-size:1.05rem;margin-bottom:8px;">
+                        {target.get('product_name', '—')}
+                    </div>
+                    <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;">
+                        <div><span style="color:#64748B;font-size:0.8rem;">Бренд: </span>
+                             <span style="color:#94A3B8;font-size:0.85rem;">{target.get('brand') or '—'}</span></div>
+                        <div><span style="color:#64748B;font-size:0.8rem;">Фасовка: </span>
+                             <span style="color:#94A3B8;font-size:0.85rem;">{target.get('weight_volume') or '—'}</span></div>
+                    </div>
+                    <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;">
+                        <div style="background:rgba(99,102,241,0.15);border-radius:8px;padding:8px 14px;">
+                            <div style="color:#64748B;font-size:0.7rem;">Цена конкурента</div>
+                            <div style="color:#A5B4FC;font-weight:800;font-size:1.2rem;">
+                                {target.get('comp_regular_price') or '—'} ₽</div>
+                        </div>
+                        {f'<div style="background:rgba(245,158,11,0.12);border-radius:8px;padding:8px 14px;"><div style="color:#64748B;font-size:0.7rem;">Промо конкурента</div><div style="color:#FBBF24;font-weight:800;font-size:1.2rem;">{target.get("comp_promo_price")} ₽</div></div>' if target.get("comp_promo_price") else ""}
+                        <div style="margin-left:auto;">
+                            <div style="color:#64748B;font-size:0.7rem;margin-bottom:2px;">Уверенность AI</div>
+                            <div style="color:{conf_color};font-weight:700;font-size:1rem;">
+                                {int(conf*100)}%</div>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                # Матчинг
+                cands = target.get("candidates", [])
+                if cands:
+                    st.markdown("""<div style="color:#64748B;font-size:0.75rem;font-weight:600;
+                                    text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">
+                        Сопоставление с базой Самбери</div>""", unsafe_allow_html=True)
+                    
+                    opts = [f"[{c['score']}%] {c['sku']} — {c['name']}" for c in cands]
+                    sel = st.selectbox("Выбрать SKU:", opts, label_visibility="collapsed")
+                    
+                    if st.button("✅ Применить выбранный SKU", key="apply_sku"):
+                        sku = sel.split("—")[0].split("]")[1].strip()
+                        chosen = next((c for c in cands if str(c['sku']) == sku), None)
+                        if chosen:
+                            target.update({
+                                "matched_sku": chosen["sku"],
+                                "matched_name": chosen["name"],
+                                "our_purchase_price": chosen["purchase_price"],
+                                "our_sale_price": chosen["sale_price"],
+                                "our_promo_price": chosen["promo_price"]
+                            })
+                            upd = calculate_price_metrics(target)
+                            target.update(upd)
+                            st.success(f"SKU {sku} применён!")
                             st.rerun()
 
 
-# ==========================================
-# ВКЛАДКА 3: АНАЛИТИКА И PRICE INDEX
-# ==========================================
-with tab_dashboard:
+# ─────────────────────────────────────────
+# ВКЛАДКА 3: АНАЛИТИКА
+# ─────────────────────────────────────────
+with tab3:
     if not st.session_state.processed_results:
-        st.info("💡 Нет данных. Сначала проведите распознавание ценников во вкладке 1.")
+        st.markdown("""
+        <div style="text-align:center;padding:60px 20px;">
+            <div style="font-size:4rem;margin-bottom:16px;">📊</div>
+            <div style="color:#E2E8F0;font-size:1.3rem;font-weight:700;margin-bottom:8px;">Нет данных для анализа</div>
+            <div style="color:#475569;">Сначала проведите распознавание ценников</div>
+        </div>
+        """, unsafe_allow_html=True)
     else:
         results = st.session_state.processed_results
-        summary = summarize_price_index(results)
+        s = summarize_price_index(results)
 
         # KPI карточки
-        k1, k2, k3, k4 = st.columns(4)
-        with k1:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Средний Price Index (PI)", f"{summary['avg_price_index']}%", delta=f"{round(summary['avg_price_index'] - 100, 1)}% vs Самбери")
-            st.caption("PI < 100% — конкурент в среднем дешевле")
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        with k2:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Корзинный Price Index", f"{summary['basket_price_index']}%")
-            st.caption(f"Корзина: Самбери {summary['total_our_basket']} ₽ vs Конк. {summary['total_comp_basket']} ₽")
-            st.markdown('</div>', unsafe_allow_html=True)
+        kc1, kc2, kc3, kc4 = st.columns(4, gap="medium")
+        with kc1:
+            delta = round(s['avg_price_index'] - 100, 1)
+            delta_sign = "+" if delta > 0 else ""
+            st.markdown(f"""
+            <div class="kpi-card kpi-blue">
+                <div class="kpi-label">Средний Price Index</div>
+                <div class="kpi-value">{s['avg_price_index']}%</div>
+                <div class="kpi-caption">Отклонение от Самбери: {delta_sign}{delta}%</div>
+            </div>""", unsafe_allow_html=True)
 
-        with k3:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Самбери дешевле", f"{summary['samberi_cheaper_count']} поз.", delta=f"{round(summary['samberi_cheaper_count']/summary['total_items']*100, 1)}%")
-            st.caption(f"Паритет цен: {summary['parity_count']} поз.")
-            st.markdown('</div>', unsafe_allow_html=True)
+        with kc2:
+            st.markdown(f"""
+            <div class="kpi-card kpi-blue">
+                <div class="kpi-label">Корзинный PI</div>
+                <div class="kpi-value">{s['basket_price_index']}%</div>
+                <div class="kpi-caption">Конк. {s['total_comp_basket']} ₽ vs Смб. {s['total_our_basket']} ₽</div>
+            </div>""", unsafe_allow_html=True)
 
-        with k4:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Демпинг конкурента", f"{summary['dumping_alerts_count']} алертов", delta="-Риск" if summary['dumping_alerts_count'] > 0 else "0", delta_color="inverse")
-            st.caption("Цена конкурента ниже закупки Самбери")
-            st.markdown('</div>', unsafe_allow_html=True)
+        with kc3:
+            pct_cheaper = round(s['samberi_cheaper_count'] / s['total_items'] * 100, 0) if s['total_items'] > 0 else 0
+            st.markdown(f"""
+            <div class="kpi-card kpi-green">
+                <div class="kpi-label">Самбери дешевле</div>
+                <div class="kpi-value">{s['samberi_cheaper_count']}</div>
+                <div class="kpi-caption">{int(pct_cheaper)}% позиций • паритет: {s['parity_count']}</div>
+            </div>""", unsafe_allow_html=True)
 
-        st.divider()
+        with kc4:
+            st.markdown(f"""
+            <div class="kpi-card {'kpi-yellow' if s['dumping_alerts_count'] > 0 else 'kpi-red'}">
+                <div class="kpi-label">{'⚠️ Алерты демпинга' if s['dumping_alerts_count'] > 0 else 'Конкурент дешевле'}</div>
+                <div class="kpi-value">{s['dumping_alerts_count'] if s['dumping_alerts_count'] > 0 else s['competitor_cheaper_count']}</div>
+                <div class="kpi-caption">{'Цена конкурента ниже закупки Самбери!' if s['dumping_alerts_count'] > 0 else 'позиций уступаем конкуренту'}</div>
+            </div>""", unsafe_allow_html=True)
 
-        # Графики Plotly
-        g_col1, g_col2 = st.columns(2)
-        
-        with g_col1:
-            status_counts = pd.DataFrame([
-                {"Статус": "Самбери дешевле", "Количество": summary['samberi_cheaper_count']},
-                {"Статус": "Конкурент дешевле", "Количество": summary['competitor_cheaper_count']},
-                {"Статус": "Паритет (±2%)", "Количество": summary['parity_count']}
+        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+
+        # Графики
+        gc1, gc2 = st.columns(2, gap="large")
+
+        with gc1:
+            cnts = pd.DataFrame([
+                {"Статус": "✅ Самбери дешевле", "Кол-во": s['samberi_cheaper_count'], "color": "#34D399"},
+                {"Статус": "❌ Конкурент дешевле", "Кол-во": s['competitor_cheaper_count'], "color": "#F87171"},
+                {"Статус": "⚖️ Паритет (±2%)", "Кол-во": s['parity_count'], "color": "#60A5FA"},
             ])
-            status_counts = status_counts[status_counts["Количество"] > 0]
-            
-            if not status_counts.empty:
-                fig_pie = px.pie(
-                    status_counts,
-                    names="Статус",
-                    values="Количество",
-                    title="Ценовое позиционирование (Доли)",
-                    color="Статус",
-                    color_discrete_map={
-                        "Самбери дешевле": "#137333",
-                        "Конкурент дешевле": "#C5221F",
-                        "Паритет (±2%)": "#1A73E8"
-                    },
-                    hole=0.4
+            cnts = cnts[cnts["Кол-во"] > 0]
+            if not cnts.empty:
+                fig = px.pie(cnts, names="Статус", values="Кол-во", hole=0.55,
+                             color="Статус",
+                             color_discrete_map={
+                                 "✅ Самбери дешевле": "#34D399",
+                                 "❌ Конкурент дешевле": "#F87171",
+                                 "⚖️ Паритет (±2%)": "#60A5FA"
+                             })
+                fig.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#94A3B8", family="Inter"),
+                    title=dict(text="Распределение ценовых позиций", font=dict(color="#E2E8F0", size=14)),
+                    legend=dict(font=dict(color="#94A3B8", size=11)),
+                    margin=dict(l=0, r=0, t=40, b=0),
+                    height=340
                 )
-                fig_pie.update_layout(margin=dict(l=20, r=20, t=40, b=20), height=350)
-                st.plotly_chart(fig_pie, use_container_width=True)
+                fig.update_traces(textfont_color="#E2E8F0")
+                st.plotly_chart(fig, use_container_width=True)
 
-        with g_col2:
-            diff_list = []
-            for r in results:
-                if r.get("effective_diff_rub") is not None:
-                    diff_list.append({
-                        "Товар": (r.get("matched_name") or r.get("product_name", ""))[:28],
-                        "Разница (руб)": r.get("effective_diff_rub")
-                    })
-            
-            if diff_list:
-                diff_df = pd.DataFrame(diff_list).sort_values(by="Разница (руб)", ascending=True)
-                fig_bar = px.bar(
-                    diff_df.head(10),
-                    x="Разница (руб)",
-                    y="Товар",
+        with gc2:
+            diff_data = [
+                {"Товар": (r.get("matched_name") or r.get("product_name",""))[:30],
+                 "Разница ₽": r.get("effective_diff_rub")}
+                for r in results if r.get("effective_diff_rub") is not None
+            ]
+            if diff_data:
+                dd = pd.DataFrame(diff_data).sort_values("Разница ₽")
+                dd["Цвет"] = dd["Разница ₽"].apply(lambda x: "#F87171" if x < 0 else "#34D399")
+                fig2 = go.Figure(go.Bar(
+                    x=dd["Разница ₽"],
+                    y=dd["Товар"].str[:25],
                     orientation="h",
-                    title="Топ позиций, где Конкурент дешевле Самбери (руб)",
-                    color="Разница (руб)",
-                    color_continuous_scale="Reds_r"
+                    marker=dict(color=dd["Цвет"], opacity=0.85),
+                    text=dd["Разница ₽"].apply(lambda x: f"{x:+.2f} ₽"),
+                    textfont=dict(color="#E2E8F0", size=10),
+                    textposition="outside"
+                ))
+                fig2.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#94A3B8", family="Inter"),
+                    title=dict(text="Разница цен по позициям (₽)", font=dict(color="#E2E8F0", size=14)),
+                    xaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)", color="#475569"),
+                    yaxis=dict(color="#94A3B8"),
+                    margin=dict(l=0, r=80, t=40, b=0),
+                    height=340
                 )
-                fig_bar.update_layout(margin=dict(l=20, r=20, t=40, b=20), height=350)
-                st.plotly_chart(fig_bar, use_container_width=True)
+                st.plotly_chart(fig2, use_container_width=True)
 
 
-# ==========================================
-# ВКЛАДКА 4: ЭКСПОРТ В EXCEL
-# ==========================================
-with tab_export:
-    st.markdown("#### 📥 Выгрузка итогового отчета в Excel")
-    st.caption("Файл формируется со структурой ваших колонок, цветовой подсветкой выгодных цен и денежным форматированием.")
-
+# ─────────────────────────────────────────
+# ВКЛАДКА 4: ЭКСПОРТ
+# ─────────────────────────────────────────
+with tab4:
     if not st.session_state.processed_results:
-        st.warning("⚠️ Нет данных для экспорта. Проведите распознавание ценников во вкладке 1.")
-    else:
-        excel_data = export_comparison_to_excel(
-            st.session_state.processed_results,
-            competitor_name="Конкурент"
-        )
-
-        st.download_button(
-            label=f"💾 Скачать отчет: Мониторинг_Самбери.xlsx",
-            data=excel_data,
-            file_name=f"Monitoring_Samberi_{time.strftime('%Y%m%d_%H%M')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-            use_container_width=True
-        )
-
-        st.divider()
-        st.markdown("##### 📄 Что включено в выгружаемый Excel:")
         st.markdown("""
-        1. **Код нашего товара** (SKU Самбери)
-        2. **Наименование товара** (по номенклатуре сети)
-        3. **Распознано с ценника** (точный текст с ценника конкурента)
-        4. **Цена закупки товара** (себестоимость)
-        5. **Цена продажи товара** (регулярная полка Самбери)
-        6. **Цена на промо у товара** (акция Самбери)
-        7. **Текущая цена конкурента этого товара**
-        8. **Цена на промо у конкурента**
-        9. **Разница цен (руб)**
-        10. **Price Index (PI %)**
-        11. **Статус выгодности** (🟢 Зеленый = Самбери выгоднее, 🔴 Красный = Конкурент дешевле)
-        12. **Предупреждения** (🟡 Желтый = продажа конкурента ниже себестоимости закупки Самбери)
-        """)
+        <div style="text-align:center;padding:60px 20px;">
+            <div style="font-size:4rem;margin-bottom:16px;">📥</div>
+            <div style="color:#E2E8F0;font-size:1.3rem;font-weight:700;margin-bottom:8px;">Нет данных для экспорта</div>
+            <div style="color:#475569;">Сначала проведите распознавание ценников во вкладке 1</div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        ec1, ec2 = st.columns([2, 1], gap="large")
+        with ec1:
+            st.markdown("""
+            <div style="margin-bottom:20px;">
+                <div style="color:#E2E8F0;font-weight:800;font-size:1.4rem;margin-bottom:6px;">
+                    📥 Выгрузка итогового отчета
+                </div>
+                <div style="color:#475569;font-size:0.9rem;">
+                    Excel-файл с профессиональным оформлением, цветовой подсветкой и всеми расчётами
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            excel_bytes = export_comparison_to_excel(st.session_state.processed_results)
+            fname = f"Monitoring_Samberi_{time.strftime('%Y%m%d_%H%M')}.xlsx"
+
+            st.download_button(
+                label=f"⬇️  Скачать Excel-отчёт  ({len(st.session_state.processed_results)} позиций)",
+                data=excel_bytes,
+                file_name=fname,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+
+            st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+            st.markdown("""
+            <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);
+                        border-radius:14px;padding:20px 24px;">
+                <div style="color:#E2E8F0;font-weight:700;margin-bottom:14px;">📋 Состав отчёта</div>
+            """, unsafe_allow_html=True)
+
+            cols_info = [
+                ("🔑 Код нашего товара", "SKU из базы Самбери"),
+                ("📝 Наименование товара", "Официальное название по номенклатуре"),
+                ("🏷️ Распознано с ценника", "Точный текст ценника конкурента"),
+                ("💰 Цена закупки товара", "Себестоимость — для контроля демпинга"),
+                ("🏪 Цена продажи товара", "Текущая розничная цена Самбери"),
+                ("🎯 Цена на промо у товара", "Акционная цена Самбери"),
+                ("🏬 Текущая цена конкурента", "Регулярная цена на ценнике"),
+                ("⚡ Цена на промо у конкурента", "Акционная цена / по карте лояльности"),
+                ("📊 Разница цен (₽)", "Эффективная разница цен с учётом промо"),
+                ("📈 Price Index (PI %)", "Соотношение цен конкурента к Самбери"),
+                ("🟢🔴 Статус выгодности", "Цветовая подсветка строк в Excel"),
+                ("⚠️ Предупреждения", "Алерты демпинга ниже себестоимости"),
+            ]
+            for icon_name, desc in cols_info:
+                st.markdown(f"""
+                <div style="display:flex;align-items:flex-start;gap:10px;padding:7px 0;
+                            border-bottom:1px solid rgba(255,255,255,0.04);">
+                    <span style="color:#A5B4FC;font-weight:600;font-size:0.85rem;min-width:220px;">{icon_name}</span>
+                    <span style="color:#475569;font-size:0.82rem;">{desc}</span>
+                </div>
+                """, unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        with ec2:
+            s = summarize_price_index(st.session_state.processed_results)
+            st.markdown(f"""
+            <div style="background:linear-gradient(145deg,#162032,#1E293B);border:1px solid rgba(255,255,255,0.07);
+                        border-radius:16px;padding:24px;box-shadow:0 8px 32px rgba(0,0,0,0.3);">
+                <div style="color:#E2E8F0;font-weight:700;font-size:1rem;margin-bottom:18px;">📊 Сводка отчёта</div>
+                
+                <div style="border-bottom:1px solid rgba(255,255,255,0.05);padding:10px 0;
+                            display:flex;justify-content:space-between;align-items:center;">
+                    <span style="color:#64748B;font-size:0.85rem;">Позиций в отчёте</span>
+                    <span style="color:#A5B4FC;font-weight:700;">{s['total_items']}</span>
+                </div>
+                <div style="border-bottom:1px solid rgba(255,255,255,0.05);padding:10px 0;
+                            display:flex;justify-content:space-between;align-items:center;">
+                    <span style="color:#64748B;font-size:0.85rem;">Сопоставлено с базой</span>
+                    <span style="color:#34D399;font-weight:700;">{s['matched_items']}</span>
+                </div>
+                <div style="border-bottom:1px solid rgba(255,255,255,0.05);padding:10px 0;
+                            display:flex;justify-content:space-between;align-items:center;">
+                    <span style="color:#64748B;font-size:0.85rem;">Средний Price Index</span>
+                    <span style="color:#60A5FA;font-weight:700;">{s['avg_price_index']}%</span>
+                </div>
+                <div style="border-bottom:1px solid rgba(255,255,255,0.05);padding:10px 0;
+                            display:flex;justify-content:space-between;align-items:center;">
+                    <span style="color:#64748B;font-size:0.85rem;">Самбери дешевле</span>
+                    <span style="color:#34D399;font-weight:700;">{s['samberi_cheaper_count']} поз.</span>
+                </div>
+                <div style="border-bottom:1px solid rgba(255,255,255,0.05);padding:10px 0;
+                            display:flex;justify-content:space-between;align-items:center;">
+                    <span style="color:#64748B;font-size:0.85rem;">Конкурент дешевле</span>
+                    <span style="color:#F87171;font-weight:700;">{s['competitor_cheaper_count']} поз.</span>
+                </div>
+                <div style="padding:10px 0;display:flex;justify-content:space-between;align-items:center;">
+                    <span style="color:#64748B;font-size:0.85rem;">⚠️ Алерты демпинга</span>
+                    <span style="color:{'#FBBF24' if s['dumping_alerts_count']>0 else '#475569'};font-weight:700;">
+                        {s['dumping_alerts_count']}
+                    </span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
