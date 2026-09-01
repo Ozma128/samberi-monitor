@@ -17,7 +17,7 @@ DEFAULT_GEMINI_KEY = os.getenv("GEMINI_API_KEY") or (
     st.secrets.get("GEMINI_API_KEY", "AQ.Ab8RN6IDk5YuonlD9QV_bFxAg0TVY_ofWJKSTOk7Q0eUnv7Yeg")
     if hasattr(st, "secrets") else "AQ.Ab8RN6IDk5YuonlD9QV_bFxAg0TVY_ofWJKSTOk7Q0eUnv7Yeg"
 )
-MATCH_THRESHOLD = 90.0
+MATCH_THRESHOLD = 65.0
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 from core.vision_extractor import PriceTagExtractor
