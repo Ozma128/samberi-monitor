@@ -1,6 +1,6 @@
 """
 Главное веб-приложение для мониторинга ценников конкурентов сети "Самбери".
-Запуск: streamlit run app.py
+Работает на базе Google Gemini Vision AI с жестко зашитым API-ключом и порогом точности 90%.
 """
 
 import os
@@ -13,10 +13,14 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 from PIL import Image
-from dotenv import load_dotenv
 
-# Загружаем переменные окружения из .env если есть
-load_dotenv()
+# Зашитый API-ключ Gemini по умолчанию
+DEFAULT_GEMINI_KEY = os.getenv("GEMINI_API_KEY") or (
+    st.secrets.get("GEMINI_API_KEY") if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets else "AQ.Ab8RN6IDk5YuonlD9QV_bFxAg0TVY_ofWJKSTOk7Q0eUnv7Yeg"
+)
+
+# Фиксированный порог точности матчинга
+MATCH_THRESHOLD = 90.0
 
 # Добавляем корень проекта в sys.path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
@@ -26,17 +30,20 @@ from core.matcher import CatalogMatcher
 from core.analytics import calculate_price_metrics, summarize_price_index
 from core.exporter import export_comparison_to_excel
 
-# Конфигурация страницы Streamlit
+# Конфигурация страницы Streamlit (без боковой панели, чистый полноэкранный интерфейс)
 st.set_page_config(
     page_title="Самбери: Мониторинг ценников",
     page_icon="🛒",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 # Пользовательские стили CSS
 st.markdown("""
 <style>
+    [data-testid="stSidebar"] {
+        display: none;
+    }
     .main-title {
         font-size: 2.2rem;
         font-weight: 700;
@@ -55,14 +62,6 @@ st.markdown("""
         border-left: 5px solid #1E3A8A;
         box-shadow: 0 1px 3px rgba(0,0,0,0.05);
     }
-    .status-cheaper {
-        color: #137333;
-        font-weight: bold;
-    }
-    .status-expensive {
-        color: #C5221F;
-        font-weight: bold;
-    }
     .stTabs [data-baseweb="tab-list"] {
         gap: 8px;
     }
@@ -71,9 +70,9 @@ st.markdown("""
         white-space: pre-wrap;
         background-color: #F1F5F9;
         border-radius: 6px 6px 0px 0px;
-        gap: 1px;
         padding-top: 10px;
         padding-bottom: 10px;
+        font-weight: 500;
     }
     .stTabs [aria-selected="true"] {
         background-color: #1E3A8A !important;
@@ -84,7 +83,6 @@ st.markdown("""
 
 # Инициализация session_state
 if "catalog_df" not in st.session_state:
-    # Загружаем демонстрационный каталог по умолчанию, если он существует
     default_cat_path = "data/samples/samberi_catalog_sample.xlsx"
     if os.path.exists(default_cat_path):
         st.session_state.catalog_df = pd.read_excel(default_cat_path)
@@ -97,78 +95,16 @@ if "processed_results" not in st.session_state:
 if "uploaded_images_cache" not in st.session_state:
     st.session_state.uploaded_images_cache = {}
 
-# --- Боковая панель (Настройки) ---
-with st.sidebar:
-    st.image("https://img.icons8.com/color/96/shopping-cart--v1.png", width=64)
-    st.markdown("### ⚙️ Настройки аудита")
-    
-    competitor_name = st.selectbox(
-        "🏪 Сеть конкурента",
-        ["Реми", "Пятерочка", "Экономыч", "Близкий", "Винлаб", "Бристоль", "Бауцентр", "Другой"],
-        index=0
-    )
-    if competitor_name == "Другой":
-        competitor_name = st.text_input("Укажите название конкурента", "Конкурент")
-
-    store_location = st.text_input("📍 Город / Адрес магазина", "Хабаровск, ул. Суворова")
-    category_name = st.selectbox(
-        "📦 Категория товаров",
-        ["Все категории", "Молочный гастроном", "Мясная гастрономия", "Бакалея", "Сыры", "Чай и кофе", "Кондитерские изделия", "Напитки"],
-        index=0
-    )
-
-    st.divider()
-    st.markdown("### 🤖 Модель распознавания (AI)")
-    
-    ai_provider = st.radio(
-        "Движок Vision AI",
-        [
-            "Google Gemini 1.5 Flash (Прямой API)",
-            "OpenRouter.ai (Работает в РФ без VPN)",
-            "OpenAI GPT-4o-mini",
-            "Тестовый демо-режим (Без API ключа)"
-        ],
-        index=0
-    )
-
-    api_key = ""
-    provider_code = "gemini"
-    base_url = None
-    
-    if "Gemini" in ai_provider:
-        provider_code = "gemini"
-        default_gemini = os.getenv("GEMINI_API_KEY", "")
-        api_key = st.text_input("Ключ Gemini API", value=default_gemini, type="password", help="Бесплатный ключ на aistudio.google.com")
-        if not api_key:
-            st.info("💡 Требуется VPN при получении на ПК, либо используйте вариант OpenRouter/Сервер.")
-    elif "OpenRouter" in ai_provider:
-        provider_code = "openrouter"
-        default_openrouter = os.getenv("OPENROUTER_API_KEY", "")
-        api_key = st.text_input("Ключ OpenRouter API", value=default_openrouter, type="password", help="Ключ с openrouter.ai (работает из РФ напрямую)")
-        base_url = "https://openrouter.ai/api/v1"
-        st.success("✅ Работает с российских IP без VPN")
-    elif "OpenAI" in ai_provider:
-        provider_code = "openai"
-        default_openai = os.getenv("OPENAI_API_KEY", "")
-        api_key = st.text_input("Ключ OpenAI API", value=default_openai, type="password")
-    else:
-        provider_code = "mock"
-        st.success("✅ Демо-режим активен. Запросы к API не расходуются.")
-
-    match_threshold = st.slider("Порог точности матчинга (%)", min_value=20, max_value=90, value=40, step=5)
-
-
-# --- Основной заголовок ---
+# --- Заголовок приложения ---
 st.markdown('<div class="main-title">🛒 Самбери: Мониторинг и анализ ценников</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Автоматическое распознавание ценников конкурентов, матчинг с номенклатурой Самбери и расчет Price Index</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Автоматическое распознавание ценников через Google Gemini AI, сопоставление с номенклатурой Самбери и расчет Price Index</div>', unsafe_allow_html=True)
 
-# Вкладки интерфейса
-tab_upload, tab_table, tab_dashboard, tab_export, tab_server = st.tabs([
+# 4 основные вкладки приложения
+tab_upload, tab_table, tab_dashboard, tab_export = st.tabs([
     "📸 1. Загрузка и анализ фото",
     "📋 2. Сравнительная таблица",
     "📊 3. Аналитика и Price Index",
-    "📥 4. Экспорт в Excel",
-    "🚀 5. Сервер 24/7 и Telegram"
+    "📥 4. Экспорт в Excel"
 ])
 
 
@@ -180,7 +116,7 @@ with tab_upload:
 
     with col_cat:
         st.markdown("#### 1. Справочник цен Самбери")
-        st.caption("Загрузите Excel или используйте встроенный каталог для сопоставления.")
+        st.caption("Загрузите Excel с базой Самбери или используйте встроенный каталог.")
         
         uploaded_catalog_file = st.file_uploader(
             "Загрузить файл каталога Самбери (.xlsx / .csv)",
@@ -231,7 +167,6 @@ with tab_upload:
     if st.button("🚀 НАЧАТЬ РАСПОЗНАВАНИЕ И РАСЧЕТ", type="primary", use_container_width=True, disabled=run_disabled):
         images_to_process = []
         
-        # Если нажата кнопка демо
         if demo_btn or (uploaded_photos and len(uploaded_photos) == 0):
             demo_names = [
                 "tag_moloko_domik_3_2.jpg", "tag_maslo_prostokvashino_82.jpg", "tag_syr_brest_45.jpg",
@@ -246,7 +181,6 @@ with tab_upload:
                     "mime": "image/jpeg"
                 })
         else:
-            # Обработка загруженных файлов
             for f in uploaded_photos:
                 if f.name.lower().endswith(".zip"):
                     try:
@@ -273,29 +207,32 @@ with tab_upload:
             start_time = time.time()
 
             extractor = PriceTagExtractor(
-                provider=provider_code,
-                api_key=api_key,
-                base_url=base_url
+                provider="gemini",
+                api_key=DEFAULT_GEMINI_KEY
             )
             
             def progress_callback(completed, total, latest_res):
                 progress = completed / total
                 progress_bar.progress(progress)
-                status_text.text(f"Распознавание Vision AI: {completed}/{total} фото... (последнее: {latest_res.get('product_name', '')[:40]})")
+                status_text.text(f"Распознавание Google Gemini: {completed}/{total} фото... (последнее: {latest_res.get('product_name', '')[:40]})")
 
-            # 1. Распознавание ценников через Vision AI
+            # 1. Распознавание ценников через Google Gemini
             recognized_items = extractor.extract_batch(
                 images_to_process,
-                max_workers=8 if provider_code != "mock" else 4,
+                max_workers=8,
                 on_progress=progress_callback
             )
             
             elapsed_vision = round(time.time() - start_time, 1)
-            status_text.text(f"Матчинг номенклатуры с каталогом Самбери...")
+            status_text.text(f"Матчинг номенклатуры с базой Самбери (порог точности {int(MATCH_THRESHOLD)}%)...")
 
-            # 2. Нечеткий матчинг
+            # 2. Нечеткий матчинг с фиксированным порогом 90%
             matcher = CatalogMatcher(st.session_state.catalog_df)
-            matched_items = matcher.match_all(recognized_items)
+            matched_items = []
+            for item in recognized_items:
+                rec_name = item.get("product_name", "")
+                match_info = matcher.match_item(rec_name, threshold=MATCH_THRESHOLD)
+                matched_items.append({**item, **match_info})
 
             # 3. Расчет Price Index и аналитики
             final_processed = [calculate_price_metrics(it) for it in matched_items]
@@ -315,7 +252,7 @@ with tab_table:
     else:
         results = st.session_state.processed_results
         
-        # Фильтры и быстрые действия
+        # Фильтры
         col_f1, col_f2, col_f3 = st.columns([1.5, 1.5, 1])
         with col_f1:
             status_filter = st.selectbox(
@@ -327,10 +264,9 @@ with tab_table:
         with col_f3:
             st.metric("Всего позиций", len(results))
 
-        # Формируем DataFrame для отображения со структурой пользователя
+        # Формируем таблицу со строгой структурой колонок пользователя
         table_rows = []
         for r in results:
-            # Применение фильтров
             if status_filter == "✅ Самбери дешевле" and r.get("status") != "✅ Самбери дешевле":
                 continue
             if status_filter == "❌ Конкурент дешевле" and r.get("status") != "❌ Конкурент дешевле":
@@ -348,19 +284,19 @@ with tab_table:
                     continue
 
             table_rows.append({
-                "Код товара": r.get("matched_sku") or "-",
-                "Наименование товара (Самбери)": r.get("matched_name") or r.get("product_name", ""),
-                "Цена закупки": r.get("our_purchase_price"),
-                "Цена продажи": r.get("our_sale_price"),
-                "Цена на промо": r.get("our_promo_price"),
-                f"Цена {competitor_name}": r.get("comp_regular_price"),
-                f"Промо {competitor_name}": r.get("comp_promo_price"),
-                "Разница (руб)": r.get("effective_diff_rub"),
+                "Код нашего товара": r.get("matched_sku") or "-",
+                "Наименование товара": r.get("matched_name") or r.get("product_name", ""),
+                "Цена закупки товара": r.get("our_purchase_price"),
+                "Цена продажи товара": r.get("our_sale_price"),
+                "Цена на промо у товара": r.get("our_promo_price"),
+                "Текущая цена конкурента этого товара": r.get("comp_regular_price"),
+                "Цена на промо у конкурента": r.get("comp_promo_price"),
+                "Разница цен": r.get("effective_diff_rub"),
                 "Price Index (%)": r.get("price_index_effective"),
-                "Статус": r.get("status"),
-                "Предупреждение": r.get("alert") or "",
+                "Статус выгодности": r.get("status"),
+                "Предупреждения": r.get("alert") or "",
                 "Распознано с ценника": r.get("product_name", ""),
-                "Файл": r.get("filename", "")
+                "Файл фото": r.get("filename", "")
             })
 
         display_df = pd.DataFrame(table_rows)
@@ -368,19 +304,18 @@ with tab_table:
         if display_df.empty:
             st.warning("По выбранным фильтрам позиции не найдены.")
         else:
-            # Настройка форматирования колонок
             column_config = {
-                "Код товара": st.column_config.TextColumn("Код товара", width="small"),
-                "Наименование товара (Самбери)": st.column_config.TextColumn("Наименование товара", width="large"),
-                "Цена закупки": st.column_config.NumberColumn("Цена закупки", format="%.2f ₽"),
-                "Цена продажи": st.column_config.NumberColumn("Цена продажи", format="%.2f ₽"),
-                "Цена на промо": st.column_config.NumberColumn("Цена на промо", format="%.2f ₽"),
-                f"Цена {competitor_name}": st.column_config.NumberColumn(f"Цена {competitor_name}", format="%.2f ₽"),
-                f"Промо {competitor_name}": st.column_config.NumberColumn(f"Промо {competitor_name}", format="%.2f ₽"),
-                "Разница (руб)": st.column_config.NumberColumn("Разница цен", format="%.2f ₽"),
+                "Код нашего товара": st.column_config.TextColumn("Код нашего товара", width="small"),
+                "Наименование товара": st.column_config.TextColumn("Наименование товара", width="large"),
+                "Цена закупки товара": st.column_config.NumberColumn("Цена закупки товара", format="%.2f ₽"),
+                "Цена продажи товара": st.column_config.NumberColumn("Цена продажи товара", format="%.2f ₽"),
+                "Цена на промо у товара": st.column_config.NumberColumn("Цена на промо у товара", format="%.2f ₽"),
+                "Текущая цена конкурента этого товара": st.column_config.NumberColumn("Текущая цена конкурента", format="%.2f ₽"),
+                "Цена на промо у конкурента": st.column_config.NumberColumn("Цена на промо у конкурента", format="%.2f ₽"),
+                "Разница цен": st.column_config.NumberColumn("Разница цен", format="%.2f ₽"),
                 "Price Index (%)": st.column_config.NumberColumn("Price Index", format="%.1f%%"),
-                "Статус": st.column_config.TextColumn("Статус", width="medium"),
-                "Предупреждение": st.column_config.TextColumn("Предупреждение", width="medium"),
+                "Статус выгодности": st.column_config.TextColumn("Статус выгодности", width="medium"),
+                "Предупреждения": st.column_config.TextColumn("Предупреждения", width="medium"),
             }
 
             st.dataframe(
@@ -392,7 +327,7 @@ with tab_table:
 
         st.divider()
 
-        # Панель детального просмотра и проверки фото
+        # Детальный просмотр и сверка
         st.markdown("#### 🔍 Детальный просмотр ценника и корректировка")
         selected_file = st.selectbox(
             "Выберите ценник для проверки:",
@@ -429,7 +364,6 @@ with tab_table:
                         candidate_options,
                         index=current_idx
                     )
-                    # Кнопка для ручного пересчета при выборе альтернативного кандидата
                     if st.button("Применить выбранный SKU к этой строке"):
                         chosen_sku = sel_candidate_str.split(" — ")[0]
                         chosen_cand = next((c for c in candidates if str(c['sku']) == chosen_sku), None)
@@ -439,7 +373,6 @@ with tab_table:
                             target_item["our_purchase_price"] = chosen_cand["purchase_price"]
                             target_item["our_sale_price"] = chosen_cand["sale_price"]
                             target_item["our_promo_price"] = chosen_cand["promo_price"]
-                            # Пересчитываем метрики
                             updated = calculate_price_metrics(target_item)
                             for k, v in updated.items():
                                 target_item[k] = v
@@ -489,11 +422,10 @@ with tab_dashboard:
         g_col1, g_col2 = st.columns(2)
         
         with g_col1:
-            # Круговая диаграмма соотношения цен
             status_counts = pd.DataFrame([
-                {"Статус": "Самбери дешевле", "Количество": summary['samberi_cheaper_count'], "Цвет": "#137333"},
-                {"Статус": "Конкурент дешевле", "Количество": summary['competitor_cheaper_count'], "Цвет": "#C5221F"},
-                {"Статус": "Паритет (±2%)", "Количество": summary['parity_count'], "Цвет": "#1A73E8"}
+                {"Статус": "Самбери дешевле", "Количество": summary['samberi_cheaper_count']},
+                {"Статус": "Конкурент дешевле", "Количество": summary['competitor_cheaper_count']},
+                {"Статус": "Паритет (±2%)", "Количество": summary['parity_count']}
             ])
             status_counts = status_counts[status_counts["Количество"] > 0]
             
@@ -515,14 +447,12 @@ with tab_dashboard:
                 st.plotly_chart(fig_pie, use_container_width=True)
 
         with g_col2:
-            # Топ товаров с наибольшей разницей в ценах
             diff_list = []
             for r in results:
                 if r.get("effective_diff_rub") is not None:
                     diff_list.append({
                         "Товар": (r.get("matched_name") or r.get("product_name", ""))[:28],
-                        "Разница (руб)": r.get("effective_diff_rub"),
-                        "Конкурент": competitor_name
+                        "Разница (руб)": r.get("effective_diff_rub")
                     })
             
             if diff_list:
@@ -545,22 +475,20 @@ with tab_dashboard:
 # ==========================================
 with tab_export:
     st.markdown("#### 📥 Выгрузка итогового отчета в Excel")
-    st.caption("Файл формируется с точной структурой ваших колонок, цветовой подсветкой выгодных цен и денежным форматированием.")
+    st.caption("Файл формируется со структурой ваших колонок, цветовой подсветкой выгодных цен и денежным форматированием.")
 
     if not st.session_state.processed_results:
         st.warning("⚠️ Нет данных для экспорта. Проведите распознавание ценников во вкладке 1.")
     else:
-        # Генерируем Excel через наш модуль exporter
         excel_data = export_comparison_to_excel(
             st.session_state.processed_results,
-            competitor_name=competitor_name,
-            category_name=category_name
+            competitor_name="Конкурент"
         )
 
         st.download_button(
-            label=f"💾 Скачать отчет: Мониторинг_Самбери_vs_{competitor_name}.xlsx",
+            label=f"💾 Скачать отчет: Мониторинг_Самбери.xlsx",
             data=excel_data,
-            file_name=f"Monitoring_Samberi_vs_{competitor_name}_{time.strftime('%Y%m%d_%H%M')}.xlsx",
+            file_name=f"Monitoring_Samberi_{time.strftime('%Y%m%d_%H%M')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
             use_container_width=True
@@ -568,59 +496,17 @@ with tab_export:
 
         st.divider()
         st.markdown("##### 📄 Что включено в выгружаемый Excel:")
-        st.markdown(f"""
+        st.markdown("""
         1. **Код нашего товара** (SKU Самбери)
         2. **Наименование товара** (по номенклатуре сети)
-        3. **Распознано с ценника** (точный текст с ценника {competitor_name})
+        3. **Распознано с ценника** (точный текст с ценника конкурента)
         4. **Цена закупки товара** (себестоимость)
         5. **Цена продажи товара** (регулярная полка Самбери)
         6. **Цена на промо у товара** (акция Самбери)
-        7. **Текущая цена {competitor_name}**
-        8. **Цена на промо {competitor_name}**
+        7. **Текущая цена конкурента этого товара**
+        8. **Цена на промо у конкурента**
         9. **Разница цен (руб)**
         10. **Price Index (PI %)**
         11. **Статус выгодности** (🟢 Зеленый = Самбери выгоднее, 🔴 Красный = Конкурент дешевле)
         12. **Предупреждения** (🟡 Желтый = продажа конкурента ниже себестоимости закупки Самбери)
         """)
-
-
-# ==========================================
-# ВКЛАДКА 5: СЕРВЕР 24/7 И TELEGRAM-БОТ
-# ==========================================
-with tab_server:
-    st.markdown("### 🌐 Автономная круглосуточная работа (24/7)")
-    st.markdown("""
-    Чтобы система работала непрерывно даже при выключенном рабочем компьютере, ее можно развернуть на недорогом облачном сервере (VPS) за **~200–300 рублей в месяц** (TimeWeb Cloud, Beget, Selectel).
-    """)
-
-    st.markdown("#### 📲 Варианты использования на сервере:")
-    c_s1, c_s2 = st.columns(2)
-    
-    with c_s1:
-        st.markdown("""
-        **1. Web-сервис по ссылке (в браузере):**
-        * Доступен 24/7 по адресу `https://monitor.ваш-домен.ru` или по IP-адресу.
-        * Защищен паролем (вход только для сотрудников отдела ценообразования).
-        * Можно открывать как с ПК, так и со смартфона/планшета в торговом зале.
-        """)
-
-    with c_s2:
-        st.markdown("""
-        **2. Мобильный Telegram-бот:**
-        * Аудитор в торговом зале конкурента прямо с телефона отправляет пачку из 50-100 фото в Telegram-чат.
-        * Бот на сервере в фоновом режиме распознает все ценники.
-        * Через 1 минуту бот присылает готовый Excel-файл обратно в Telegram!
-        """)
-
-    st.divider()
-    st.markdown("#### 🛠️ Пошаговая инструкция по запуску на сервере:")
-    st.code("""
-# 1. Арендуйте любой Ubuntu VPS (1 CPU, 2GB RAM ~ 200 руб/мес)
-# 2. Клонируйте проект и установите зависимости:
-git clone <ваш_репозиторий>
-cd Мониторинг
-pip install -r requirements.txt
-
-# 3. Запустите в фоновом режиме 24/7 через systemd или tmux:
-streamlit run app.py --server.port 8501 --server.headless true
-    """, language="bash")
