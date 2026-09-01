@@ -1,0 +1,11 @@
+streamlit>=1.35.0
+pandas>=2.2.0
+openpyxl>=3.1.2
+rapidfuzz>=3.9.0
+plotly>=5.22.0
+google-genai>=0.1.1
+openai>=1.30.0
+pillow>=10.0.0
+requests>=2.31.0
+python-dotenv>=1.0.1
+python-telegram-bot>=21.0

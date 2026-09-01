@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  samberi-monitor:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: samberi_price_monitor
+    restart: always
+    ports:
+      - "8501:8501"
+    env_file:
+      - ../.env
+    volumes:
+      - ../data:/app/data
