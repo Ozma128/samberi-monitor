@@ -387,11 +387,7 @@ st.markdown("""
 for key in ["catalog_df", "processed_results", "uploaded_images_cache"]:
     if key not in st.session_state:
         default = pd.DataFrame() if key == "catalog_df" else ([] if key == "processed_results" else {})
-        if key == "catalog_df":
-            p = "data/samples/samberi_catalog_sample.xlsx"
-            st.session_state.catalog_df = pd.read_excel(p) if os.path.exists(p) else pd.DataFrame()
-        else:
-            st.session_state[key] = default
+        st.session_state[key] = default
 
 # ==========================================
 # ВКЛАДКИ
@@ -414,13 +410,13 @@ with tab1:
     with col_left:
         st.markdown("""
         <div class="card">
-            <div class="card-title">📂 Справочник цен Самбери</div>
-            <div class="card-subtitle">Загрузите Excel/CSV с базой Самбери — программа автоматически найдет столбцы с кодом, наименованием и ценами.</div>
+            <div class="card-title">📂 1. Ваш справочник цен Самбери</div>
+            <div class="card-subtitle">Загрузите файл Excel (.xlsx) или CSV с номенклатурой Самбери, ценами закупки, продажи и промо.</div>
         </div>
         """, unsafe_allow_html=True)
         
         uploaded_catalog = st.file_uploader(
-            "Перетащите файл или нажмите для выбора",
+            "Перетащите файл Excel или CSV сюда",
             type=["xlsx", "xls", "csv"],
             key="catalog_uploader",
             label_visibility="collapsed"
@@ -441,12 +437,12 @@ with tab1:
                 <span style="font-size:1.5rem;">📦</span>
                 <div>
                     <div style="color:#34D399;font-weight:700;font-size:1.1rem;">{sku_count} SKU загружено</div>
-                    <div style="color:#475569;font-size:0.8rem;">База номенклатуры Самбери готова к матчингу</div>
+                    <div style="color:#475569;font-size:0.8rem;">Ваш справочник готов к сопоставлению</div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
-            with st.expander("👁️ Предпросмотр базы Самбери", expanded=False):
+            with st.expander("👁️ Предпросмотр загруженного справочника", expanded=False):
                 st.dataframe(
                     st.session_state.catalog_df.head(8),
                     use_container_width=True,
@@ -454,24 +450,18 @@ with tab1:
                 )
         else:
             st.markdown("""
-            <div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);
-                        border-radius:12px;padding:16px;margin-top:12px;">
-                <div style="color:#FBBF24;font-weight:600;margin-bottom:4px;">⚠️ База Самбери не загружена</div>
-                <div style="color:#64748B;font-size:0.83rem;">Загрузите файл или используйте демо-каталог</div>
+            <div style="background:rgba(255,255,255,0.03);border:1px dashed rgba(255,255,255,0.1);
+                        border-radius:12px;padding:16px;margin-top:12px;text-align:center;">
+                <div style="color:#64748B;font-size:0.85rem;">⚪ Ожидается загрузка файла справочника Самбери</div>
             </div>
             """, unsafe_allow_html=True)
-
-            if st.button("📦 Загрузить демо-каталог Самбери (12 SKU)", use_container_width=True):
-                from data.samples.generate_sample_data import generate_samples
-                st.session_state.catalog_df = pd.read_excel(generate_samples())
-                st.rerun()
 
     # ── Правая колонка: Фото ценников ──
     with col_right:
         st.markdown("""
         <div class="card">
-            <div class="card-title">📸 Фотографии ценников конкурента</div>
-            <div class="card-subtitle">Загружайте JPG/PNG фотографии ценников любым способом — по одной или целую папку в ZIP. Поддерживается до 100+ фото за один раз.</div>
+            <div class="card-title">📸 2. Фотографии ценников конкурента</div>
+            <div class="card-subtitle">Загрузите пачку фото ценников (JPG, PNG) или ZIP-архив с фото. Поддерживается до 100+ файлов за один раз.</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -493,30 +483,49 @@ with tab1:
                     <div style="color:#34D399;font-weight:700;font-size:1.1rem;">
                         {"ZIP-архив с фото" if has_zip else f"{photo_count} фото выбрано"}
                     </div>
-                    <div style="color:#475569;font-size:0.8rem;">Готово к распознаванию через Google Gemini</div>
+                    <div style="color:#475569;font-size:0.8rem;">Готово к распознаванию через Google Gemini Vision AI</div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
-        
-        demo_btn = st.button("🧪 Использовать демо-набор (10 тестовых ценников)", use_container_width=True, key="demo_btn")
+        else:
+            st.markdown("""
+            <div style="background:rgba(255,255,255,0.03);border:1px dashed rgba(255,255,255,0.1);
+                        border-radius:12px;padding:16px;margin-top:12px;text-align:center;">
+                <div style="color:#64748B;font-size:0.85rem;">⚪ Ожидается загрузка фотографий ценников</div>
+            </div>
+            """, unsafe_allow_html=True)
 
     # ── Панель запуска ──
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
     
-    has_photos = bool(uploaded_photos or demo_btn)
+    has_photos = bool(uploaded_photos and len(uploaded_photos) > 0)
     has_catalog = not st.session_state.catalog_df.empty
     ready_to_run = has_photos and has_catalog
 
-    if not has_catalog:
+    if not has_catalog and not has_photos:
+        st.markdown("""
+        <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);
+                    border-radius:12px;padding:14px 18px;text-align:center;margin-bottom:8px;">
+            <span style="color:#94A3B8;font-size:0.9rem;">Загрузите файл вашего справочника Самбери и выберите фото ценников для запуска</span>
+        </div>
+        """, unsafe_allow_html=True)
+    elif not has_catalog:
         st.markdown("""
         <div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);
                     border-radius:12px;padding:14px 18px;text-align:center;margin-bottom:8px;">
-            <span style="color:#F87171;font-weight:600;">⚠️ Необходимо загрузить базу Самбери для запуска</span>
+            <span style="color:#F87171;font-weight:600;">⚠️ Загрузите файл справочника Самбери для сопоставления</span>
+        </div>
+        """, unsafe_allow_html=True)
+    elif not has_photos:
+        st.markdown("""
+        <div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);
+                    border-radius:12px;padding:14px 18px;text-align:center;margin-bottom:8px;">
+            <span style="color:#F87171;font-weight:600;">⚠️ Выберите фотографии ценников для распознавания</span>
         </div>
         """, unsafe_allow_html=True)
 
     run_btn = st.button(
-        "🚀  НАЧАТЬ РАСПОЗНАВАНИЕ И РАСЧЁТ PRICE INDEX",
+        "🚀  НАЧАТЬ МОНИТОРИНГ И РАСЧЁТ PRICE INDEX",
         type="primary",
         use_container_width=True,
         disabled=not ready_to_run
@@ -524,33 +533,22 @@ with tab1:
 
     if run_btn:
         images_to_process = []
-
-        if demo_btn or not uploaded_photos:
-            demo_names = [
-                "tag_moloko_domik_3_2.jpg","tag_maslo_prostokvashino.jpg","tag_syr_brest_45.jpg",
-                "tag_grechka_uvelka.jpg","tag_makarony_makfa.jpg","tag_kolbasa_vyazanka.jpg",
-                "tag_tea_greenfield.jpg","tag_coffee_nescafe.jpg","tag_shokolad_ritter.jpg",
-                "tag_sok_dobry_apple.jpg"
-            ]
-            for n in demo_names:
-                images_to_process.append({"data": b"mock", "filename": n, "mime": "image/jpeg"})
-        else:
-            for f in uploaded_photos:
-                if f.name.lower().endswith(".zip"):
-                    try:
-                        with zipfile.ZipFile(f) as z:
-                            for zi in z.infolist():
-                                if not zi.is_dir() and any(zi.filename.lower().endswith(e) for e in [".jpg",".jpeg",".png"]):
-                                    d = z.read(zi.filename)
-                                    n = os.path.basename(zi.filename)
-                                    images_to_process.append({"data": d, "filename": n, "mime": "image/jpeg"})
-                                    st.session_state.uploaded_images_cache[n] = d
-                    except Exception as e:
-                        st.error(f"Ошибка ZIP: {e}")
-                else:
-                    d = f.read()
-                    images_to_process.append({"data": d, "filename": f.name, "mime": f.type or "image/jpeg"})
-                    st.session_state.uploaded_images_cache[f.name] = d
+        for f in uploaded_photos:
+            if f.name.lower().endswith(".zip"):
+                try:
+                    with zipfile.ZipFile(f) as z:
+                        for zi in z.infolist():
+                            if not zi.is_dir() and any(zi.filename.lower().endswith(e) for e in [".jpg",".jpeg",".png"]):
+                                d = z.read(zi.filename)
+                                n = os.path.basename(zi.filename)
+                                images_to_process.append({"data": d, "filename": n, "mime": "image/jpeg"})
+                                st.session_state.uploaded_images_cache[n] = d
+                except Exception as e:
+                    st.error(f"Ошибка ZIP: {e}")
+            else:
+                d = f.read()
+                images_to_process.append({"data": d, "filename": f.name, "mime": f.type or "image/jpeg"})
+                st.session_state.uploaded_images_cache[f.name] = d
 
         if not images_to_process:
             st.error("Не найдено подходящих фотографий.")
