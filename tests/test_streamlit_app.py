@@ -13,9 +13,8 @@ APP_PATH = PROJECT_ROOT / "app.py"
 SAMPLE_CATALOG_PATH = PROJECT_ROOT / "data" / "samples" / "samberi_catalog_sample.xlsx"
 
 
-def _configure_test_app(monkeypatch, *, auth_disabled: bool, password: str = "") -> None:
-    monkeypatch.setenv("APP_AUTH_DISABLED", "true" if auth_disabled else "false")
-    monkeypatch.setenv("APP_PASSWORD", password)
+def _configure_test_app(monkeypatch) -> None:
+    monkeypatch.setattr("core.settings.load_dotenv", lambda *_args, **_kwargs: False)
     monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
     monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
 
@@ -58,7 +57,7 @@ def _button_by_label(app: AppTest, label_fragment: str):
 
 
 def test_streamlit_full_flow_survives_rerun(monkeypatch) -> None:
-    _configure_test_app(monkeypatch, auth_disabled=True)
+    _configure_test_app(monkeypatch)
     app = AppTest.from_file(APP_PATH, default_timeout=30).run()
 
     assert not app.exception
@@ -114,12 +113,33 @@ def test_streamlit_full_flow_survives_rerun(monkeypatch) -> None:
     assert len(app.tabs[3].download_button) == 1
 
 
-def test_streamlit_fails_closed_without_password(monkeypatch) -> None:
-    _configure_test_app(monkeypatch, auth_disabled=False, password="")
+def test_streamlit_is_public_without_password(monkeypatch) -> None:
+    monkeypatch.delenv("APP_PASSWORD", raising=False)
+    monkeypatch.delenv("APP_AUTH_DISABLED", raising=False)
+    _configure_test_app(monkeypatch)
 
     app = AppTest.from_file(APP_PATH, default_timeout=30).run()
 
     assert not app.exception
-    assert any("Доступ закрыт" in error.value for error in app.error)
-    assert len(app.tabs) == 0
-    assert len(app.get("file_uploader")) == 0
+    assert not app.error
+    assert not app.warning
+    assert len(app.tabs) == 4
+    assert len(app.tabs[0].file_uploader) == 2
+    assert not any(element.label == "Войти" for element in app.button)
+    assert not any(element.label == "Выйти" for element in app.button)
+    assert len(app.get("text_input")) == 0
+
+
+def test_streamlit_ignores_legacy_password_setting(monkeypatch) -> None:
+    monkeypatch.setenv("APP_PASSWORD", "legacy-password-that-must-not-lock-the-site")
+    monkeypatch.setenv("APP_AUTH_DISABLED", "legacy-invalid-value")
+    _configure_test_app(monkeypatch)
+
+    app = AppTest.from_file(APP_PATH, default_timeout=30).run()
+
+    assert not app.exception
+    assert not app.error
+    assert len(app.tabs) == 4
+    assert len(app.tabs[0].file_uploader) == 2
+    assert not any(element.label in {"Войти", "Выйти"} for element in app.button)
+    assert len(app.get("text_input")) == 0

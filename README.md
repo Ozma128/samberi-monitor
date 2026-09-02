@@ -41,14 +41,6 @@ Copy-Item .env.example .env
 
 ```dotenv
 GEMINI_API_KEY=<ключ Google AI Studio>
-APP_PASSWORD=<длинный случайный пароль>
-APP_AUTH_DISABLED=false
-```
-
-Случайный пароль можно создать локально, не передавая его сторонним сервисам:
-
-```powershell
-python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
 Запустите приложение:
@@ -61,17 +53,9 @@ streamlit run app.py
 игнорируется Git и предназначен только для локальной разработки. Не копируйте
 его в образы, архивы, логи или систему контроля версий.
 
-### Локальный режим без формы входа
-
-Только на доверенном компьютере для разработки можно временно установить:
-
-```dotenv
-APP_AUTH_DISABLED=true
-```
-
-Не используйте этот режим на VPS, в общей сети, в Streamlit Community Cloud или
-при публикации порта. В рабочем окружении оставьте `APP_AUTH_DISABLED=false` и
-обязательно задайте `APP_PASSWORD`.
+Веб-интерфейс не содержит формы входа и открывается сразу. Ключ Gemini остаётся
+только на сервере и не передаётся браузеру. Поскольку любой посетитель может
+запускать обработку, обязательно задайте квоты и бюджетные оповещения у Google.
 
 ## Развёртывание в Streamlit Community Cloud
 
@@ -85,8 +69,6 @@ APP_AUTH_DISABLED=true
 ```toml
 GEMINI_API_KEY = "<ключ Google AI Studio>"
 GEMINI_MODEL = "gemini-3.6-flash"
-APP_PASSWORD = "<длинный отдельный пароль>"
-APP_AUTH_DISABLED = false
 MATCH_THRESHOLD = 72
 VISION_WORKERS = 2
 MIN_RECOGNITION_CONFIDENCE = 0.55
@@ -104,9 +86,7 @@ MIN_RECOGNITION_CONFIDENCE = 0.55
 
 ```toml
 GEMINI_API_KEY = "<секрет>"
-APP_PASSWORD = "<секрет>"
 GEMINI_MODEL = "gemini-3.6-flash"
-APP_AUTH_DISABLED = false
 ```
 
 Переменные окружения имеют приоритет над Streamlit Secrets. Сам файл
@@ -116,15 +96,12 @@ APP_AUTH_DISABLED = false
 |---|---:|---|
 | `GEMINI_API_KEY` | нет | Обязательный ключ для реального OCR. Без него обработка не запускается. |
 | `GEMINI_MODEL` | `gemini-3.6-flash` | Проверенная Vision-модель Gemini; имя должно начинаться с `gemini-`. |
-| `APP_PASSWORD` | нет | Обязательный общий пароль веб-интерфейса, если аутентификация не отключена явно. |
-| `APP_AUTH_DISABLED` | `false` | Отключает форму входа. Допустимо только локально при разработке. |
 | `MATCH_THRESHOLD` | `72` | Порог автоматического матчинга, от 50 до 100. |
 | `VISION_WORKERS` | `2` | Число параллельных запросов Gemini, от 1 до 4. |
 | `MIN_RECOGNITION_CONFIDENCE` | `0.55` | Минимальная уверенность OCR для матчинга, от 0 до 1. |
 
-Приложение работает по принципу fail closed: отсутствие `APP_PASSWORD` закрывает
-веб-доступ, а отсутствие `GEMINI_API_KEY` блокирует OCR. Автоматического перехода
-на правдоподобные тестовые данные нет.
+Интерфейс общедоступен. Отсутствие `GEMINI_API_KEY` блокирует OCR, но не закрывает
+страницу. Автоматического перехода на правдоподобные тестовые данные нет.
 
 ## Формат справочника
 
@@ -206,7 +183,7 @@ python -m pip_audit -r requirements-bot.txt
 ## Структура проекта
 
 ```text
-app.py                       Streamlit-интерфейс и защита входа
+app.py                       общедоступный Streamlit-интерфейс
 core/settings.py             единая конфигурация
 core/input_validation.py     безопасная загрузка каталогов, ZIP и изображений
 core/vision_extractor.py     Gemini Vision и валидация структурированного ответа
@@ -214,7 +191,7 @@ core/matcher.py              сопоставление с каталогом и
 core/analytics.py            нормализация цен, Price Index и сводные KPI
 core/exporter.py             безопасный Excel-экспорт
 core/pipeline.py             UI-независимая оркестрация обработки
-core/rate_limit.py           общие in-process лимиты входа и запусков анализа
+core/rate_limit.py           общие in-process лимиты запусков анализа
 deploy/telegram_bot.py       Telegram-интерфейс с allowlist и лимитами
 deploy/                      контейнеризация и руководство для VPS
 tests/                       автоматические тесты безопасности и бизнес-логики

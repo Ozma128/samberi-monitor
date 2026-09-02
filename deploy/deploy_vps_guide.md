@@ -2,8 +2,8 @@
 
 В production используйте один из двух вариантов:
 
-1. Docker Compose на VPS за HTTPS reverse proxy с обязательной аутентификацией.
-2. Приватное приложение в Streamlit Cloud с секретами в настройках платформы.
+1. Docker Compose на VPS за HTTPS reverse proxy.
+2. Общедоступное приложение в Streamlit Cloud с секретами в настройках платформы.
 
 Не публикуйте Streamlit-порт напрямую в интернет и не храните API-ключи, SSH-ключи, пароли или файлы `.env` в репозитории, Docker-образе и ZIP-архивах.
 
@@ -42,10 +42,9 @@ sudoedit /etc/samberi-monitor.env
 
 ```dotenv
 GEMINI_API_KEY=вставьте_новый_ключ
-APP_PASSWORD=вставьте_длинный_случайный_пароль
 ```
 
-Не передавайте ключ или пароль в аргументах командной строки: аргументы могут попасть в историю shell и список процессов. Файл `/etc/samberi-monitor.env` не должен находиться внутри checkout проекта.
+Не передавайте ключ в аргументах командной строки: аргументы могут попасть в историю shell и список процессов. Файл `/etc/samberi-monitor.env` не должен находиться внутри checkout проекта.
 
 ### 3. Управление контейнером через systemd
 
@@ -84,21 +83,18 @@ curl --fail http://127.0.0.1:8501/_stcore/health
 
 Compose публикует порт только на `127.0.0.1`. Он доступен reverse proxy на том же сервере, но недоступен извне напрямую. Контейнер также использует read-only filesystem, временный `/tmp`, сброшенные Linux capabilities, `no-new-privileges` и ограничения ресурсов.
 
-### 4. HTTPS и аутентификация через Nginx
+### 4. Публичный HTTPS через Nginx
 
-Для внутреннего корпоративного сервиса предпочтительны VPN или identity-aware proxy с SSO/MFA. Ниже приведён минимальный вариант с HTTPS и Basic Auth.
+Ниже приведён минимальный вариант публичного HTTPS reverse proxy. Приложение не
+запрашивает пароль, поэтому любой посетитель сможет запускать обработку и
+расходовать квоту Gemini. Для production добавьте внешний per-IP rate limiter/WAF.
 
-Установите Nginx, Certbot и утилиту для создания хеша пароля:
+Установите Nginx и Certbot:
 
 ```bash
 sudo apt-get update
-sudo apt-get install --yes nginx apache2-utils certbot python3-certbot-nginx
-sudo htpasswd -c /etc/nginx/samberi.htpasswd operator
-sudo chmod 0640 /etc/nginx/samberi.htpasswd
-sudo chown root:www-data /etc/nginx/samberi.htpasswd
+sudo apt-get install --yes nginx certbot python3-certbot-nginx
 ```
-
-Команда `htpasswd` запросит пароль интерактивно; не помещайте его в команду или конфигурацию открытым текстом.
 
 Создайте `/etc/nginx/conf.d/streamlit-websocket.conf`:
 
@@ -110,7 +106,7 @@ map $http_upgrade $connection_upgrade {
 ```
 
 Сначала создайте webroot и временную конфигурацию, которая обслуживает только
-ACME challenge. На этом этапе приложение и формы входа по HTTP не публикуются:
+ACME challenge. На этом этапе приложение по HTTP не публикуется:
 
 ```bash
 sudo install -d -o www-data -g www-data -m 0755 /var/www/certbot/.well-known/acme-challenge
@@ -146,7 +142,7 @@ sudo certbot certonly --webroot --webroot-path /var/www/certbot -d monitor.examp
 
 Только после успешного выпуска сертификата замените site-конфигурацию на
 финальную. HTTP теперь только обслуживает продление ACME и перенаправляет на
-HTTPS; пароль никогда не передаётся по открытому соединению:
+HTTPS:
 
 ```nginx
 server {
@@ -175,8 +171,6 @@ server {
     add_header Strict-Transport-Security "max-age=31536000" always;
 
     client_max_body_size 100m;
-    auth_basic "Restricted";
-    auth_basic_user_file /etc/nginx/samberi.htpasswd;
 
     location / {
         proxy_pass http://127.0.0.1:8501;
@@ -211,13 +205,11 @@ sudo ufw deny 8501/tcp
 sudo ufw enable
 ```
 
-После выпуска TLS проверьте доступ без передачи пароля в командной строке:
+После выпуска TLS проверьте публичный доступ:
 
 ```bash
-curl --fail --user operator https://monitor.example.ru/_stcore/health
+curl --fail https://monitor.example.ru/_stcore/health
 ```
-
-`curl` запросит пароль интерактивно.
 
 ### 5. Обновление и откат
 
@@ -249,10 +241,10 @@ sudo docker compose \
 
    ```toml
    GEMINI_API_KEY = "новый_ключ"
-   APP_PASSWORD = "длинный_случайный_пароль"
    ```
 
-4. Включите приватный доступ рабочей области/SSO. Если тариф или платформа не позволяют ограничить доступ, не публикуйте приложение с общим оплачиваемым API-ключом.
+4. В настройках доступа сделайте приложение публичным. Задайте квоты и
+   бюджетные оповещения Gemini до публикации общего оплачиваемого API-ключа.
 5. TLS для домена должен завершаться на инфраструктуре платформы или на одобренном компанией access proxy.
 
 Не добавляйте `.streamlit/secrets.toml` в Git. После изменения доступа или подозрения на утечку немедленно ротируйте API-ключ.
@@ -262,7 +254,7 @@ sudo docker compose \
 - `docker compose config --quiet` проходит с защищённым environment-файлом.
 - Контейнер имеет статус `healthy` и работает не от UID 0.
 - Снаружи доступны только 80/443; `8501` привязан к loopback.
-- HTTPS перенаправление работает, а страница требует аутентификацию.
+- HTTPS перенаправление работает, а страница открывается без входа.
 - Секретов нет в Git, Docker history, образе, логах и артефактах сборки.
 - Настроены квоты API и оповещения о расходах у Vision-провайдера.
 - Установлены лимиты загрузок и подтверждена политика хранения фотографий.

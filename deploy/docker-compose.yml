@@ -11,9 +11,7 @@ services:
       - "127.0.0.1:8501:8501"
     environment:
       GEMINI_API_KEY: "${GEMINI_API_KEY:?GEMINI_API_KEY must be provided by a protected environment file}"
-      APP_PASSWORD: "${APP_PASSWORD:?APP_PASSWORD must be provided by a protected environment file}"
       GEMINI_MODEL: "${GEMINI_MODEL:-gemini-3.6-flash}"
-      APP_AUTH_DISABLED: "false"
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=256m,uid=10001,gid=10001,mode=1777

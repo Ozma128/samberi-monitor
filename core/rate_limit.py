@@ -12,8 +12,8 @@ from threading import BoundedSemaphore, Lock
 class SlidingWindowRateLimiter:
     """Bound event starts within a monotonic time window.
 
-    This is a process-local guardrail. Production deployments must additionally
-    enforce authentication and request throttling at the reverse proxy or SSO.
+    This is a process-local guardrail. Public production deployments should
+    additionally enforce request throttling at the reverse proxy or WAF.
     """
 
     def __init__(self, max_events: int, window_seconds: float) -> None:
@@ -39,7 +39,6 @@ class SlidingWindowRateLimiter:
 
 @dataclass(frozen=True)
 class ApplicationGuardrails:
-    auth_attempts: SlidingWindowRateLimiter
     analysis_starts: SlidingWindowRateLimiter
     concurrent_analyses: BoundedSemaphore
 
@@ -49,7 +48,6 @@ def get_application_guardrails() -> ApplicationGuardrails:
     """Return process-wide guards that survive Streamlit script reruns."""
 
     return ApplicationGuardrails(
-        auth_attempts=SlidingWindowRateLimiter(max_events=30, window_seconds=60),
         analysis_starts=SlidingWindowRateLimiter(max_events=8, window_seconds=600),
         concurrent_analyses=BoundedSemaphore(value=1),
     )

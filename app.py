@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import time
 from typing import Any
 
@@ -74,46 +73,6 @@ def _streamlit_secrets() -> dict[str, Any]:
         return dict(st.secrets)
     except (FileNotFoundError, KeyError, OSError):
         return {}
-
-
-def _require_authentication(settings: AppSettings) -> None:
-    if settings.auth_disabled:
-        st.warning("Аутентификация явно отключена настройкой APP_AUTH_DISABLED.", icon="⚠️")
-        return
-    if not settings.app_password:
-        st.error(
-            "Доступ закрыт: администратор должен настроить APP_PASSWORD "
-            "в Streamlit Secrets или переменных окружения."
-        )
-        st.stop()
-    if st.session_state.get("_authenticated"):
-        return
-
-    now = time.monotonic()
-    locked_until = float(st.session_state.get("_auth_locked_until", 0.0))
-    st.title("🔐 Самбери: защищённый вход")
-    if locked_until > now:
-        st.error(f"Слишком много попыток. Повторите через {int(locked_until - now) + 1} сек.")
-        st.stop()
-
-    password = st.text_input("Пароль доступа", type="password", max_chars=256, key="_auth_password")
-    if st.button("Войти", type="primary", width="stretch"):
-        allowed, retry_after = _GUARDRAILS.auth_attempts.try_acquire()
-        if not allowed:
-            st.error(f"Слишком много попыток входа. Повторите через {int(retry_after) + 1} сек.")
-            st.stop()
-        if hmac.compare_digest(password.encode("utf-8"), settings.app_password.encode("utf-8")):
-            st.session_state["_authenticated"] = True
-            st.session_state["_auth_attempts"] = 0
-            st.session_state.pop("_auth_password", None)
-            st.rerun()
-        attempts = int(st.session_state.get("_auth_attempts", 0)) + 1
-        st.session_state["_auth_attempts"] = attempts
-        if attempts >= 5:
-            st.session_state["_auth_locked_until"] = now + 60.0
-            st.session_state["_auth_attempts"] = 0
-        st.error("Неверный пароль.")
-    st.stop()
 
 
 def _parse_catalog(data: bytes, filename: str) -> pd.DataFrame:
@@ -786,19 +745,12 @@ try:
 except (TypeError, ValueError, OverflowError):
     st.error("Конфигурация приложения некорректна. Проверьте переменные окружения и Secrets.")
     st.stop()
-_require_authentication(settings)
 _initialize_state()
 
-header_left, header_right = st.columns([5, 1])
-with header_left:
-    st.title("🛒 Самбери: Мониторинг ценников")
-    st.caption(
-        f"Gemini Vision · {settings.gemini_model} · строгий матчинг фасовок · защищённый Excel"
-    )
-with header_right:
-    if not settings.auth_disabled and st.button("Выйти", width="stretch"):
-        st.session_state["_authenticated"] = False
-        st.rerun()
+st.title("🛒 Самбери: Мониторинг ценников")
+st.caption(
+    f"Gemini Vision · {settings.gemini_model} · строгий матчинг фасовок · проверяемый Excel"
+)
 
 upload_tab, table_tab, analytics_tab, export_tab = st.tabs(
     ["📸 Загрузка", "📋 Таблица", "📊 Аналитика", "📥 Excel"]
