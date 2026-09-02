@@ -24,6 +24,7 @@ MAX_INDEX_NGRAMS_PER_NAME = 12
 MAX_QUERY_NGRAMS = 16
 MAX_NUMERIC_TOKEN_LENGTH = 32
 MAX_PHYSICAL_MEASURE = 10_000_000.0
+MAX_HEADER_SCAN_ROWS = 25
 
 
 def _character_trigrams(value: str) -> set[str]:
@@ -92,6 +93,9 @@ COLUMN_ALIASES = {
     "код_товара": {
         "код товара",
         "код",
+        "код номенклатуры",
+        "код позиции",
+        "код sku",
         "sku",
         "артикул",
         "product code",
@@ -105,6 +109,11 @@ COLUMN_ALIASES = {
         "название товара",
         "товар",
         "номенклатура",
+        "номенклатура товара",
+        "наим",
+        "наим товара",
+        "описание товара",
+        "продукт",
         "product name",
         "item name",
         "name",
@@ -114,6 +123,11 @@ COLUMN_ALIASES = {
         "закупочная цена",
         "себестоимость",
         "себес",
+        "закуп",
+        "закупка",
+        "закупочная",
+        "закуп руб",
+        "цена закуп",
         "purchase price",
         "purchaseprice",
         "cost price",
@@ -124,6 +138,11 @@ COLUMN_ALIASES = {
         "розничная цена",
         "регулярная цена",
         "цена",
+        "цена продажи руб",
+        "розница",
+        "розничная",
+        "цена розничная",
+        "отпускная цена",
         "sale price",
         "saleprice",
         "retail price",
@@ -135,14 +154,19 @@ COLUMN_ALIASES = {
         "промо цена",
         "акционная цена",
         "цена по акции",
+        "промо",
+        "промо руб",
+        "акция руб",
+        "цена акция",
         "promo price",
         "promoprice",
         "discount price",
     },
 }
 
-REQUIRED_COLUMNS = {"код_товара", "наименование_товара", "цена_продажи"}
-OPTIONAL_COLUMNS = {"цена_закупки", "цена_на_промо"}
+REQUIRED_COLUMNS = {"код_товара", "наименование_товара"}
+PRICE_COLUMNS = {"цена_продажи", "цена_на_промо"}
+OPTIONAL_COLUMNS = {"цена_закупки", *PRICE_COLUMNS}
 INDEX_STOPWORDS = {
     "товар",
     "продукт",
@@ -155,17 +179,99 @@ INDEX_STOPWORDS = {
 
 
 def _normalize_header(value: Any) -> str:
-    text = str(value).strip().casefold().replace("ё", "е")
-    text = re.sub(r"[_\-./]+", " ", text)
+    text = str(value).lstrip("\ufeff").strip().casefold().replace("ё", "е")
+    text = re.sub(r"\.\d+$", "", text)
+    text = re.sub(r"[\W_]+", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _canonical_header(value: Any) -> str | None:
-    normalized = _normalize_header(value)
+def _build_header_alias_map() -> dict[str, str]:
+    normalized_aliases: dict[str, str] = {}
     for canonical, aliases in COLUMN_ALIASES.items():
-        if normalized == _normalize_header(canonical) or normalized in aliases:
-            return canonical
-    return None
+        for alias in {canonical, *aliases}:
+            normalized = _normalize_header(alias)
+            previous = normalized_aliases.get(normalized)
+            if previous and previous != canonical:
+                raise RuntimeError(f"Конфликт алиасов колонок: {alias}")
+            normalized_aliases[normalized] = canonical
+    return normalized_aliases
+
+
+NORMALIZED_COLUMN_ALIASES = _build_header_alias_map()
+
+
+def _canonical_header(value: Any) -> str | None:
+    return NORMALIZED_COLUMN_ALIASES.get(_normalize_header(value))
+
+
+def _header_targets(values: Any) -> dict[str, list[Any]]:
+    targets: dict[str, list[Any]] = defaultdict(list)
+    for value in values:
+        target = _canonical_header(value)
+        if target:
+            targets[target].append(value)
+    return targets
+
+
+def _has_usable_catalog_header(targets: dict[str, list[Any]]) -> bool:
+    return REQUIRED_COLUMNS.issubset(targets) and bool(PRICE_COLUMNS & targets.keys())
+
+
+def _promote_embedded_header(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Найти шапку после заголовка отчёта, не прибегая к нечёткому угадыванию."""
+
+    if _has_usable_catalog_header(_header_targets(frame.columns)):
+        return frame, 0
+
+    best: tuple[tuple[int, int, int], int] | None = None
+    for row_index in range(min(len(frame), MAX_HEADER_SCAN_ROWS)):
+        targets = _header_targets(frame.iloc[row_index].tolist())
+        if not _has_usable_catalog_header(targets):
+            continue
+        ambiguous_count = sum(len(columns) - 1 for columns in targets.values())
+        rank = (-ambiguous_count, len(targets), -row_index)
+        if best is None or rank > best[0]:
+            best = (rank, row_index)
+
+    if best is None:
+        return frame, 0
+
+    header_index = best[1]
+    headers: list[str] = []
+    for column_index, value in enumerate(frame.iloc[header_index].tolist()):
+        if pd.isna(value) or not str(value).strip():
+            headers.append(f"__unnamed_{column_index}")
+        else:
+            headers.append(str(value).strip())
+    promoted = frame.iloc[header_index + 1 :].copy()
+    promoted.columns = headers
+    return promoted, header_index + 1
+
+
+def _has_source_value(value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip().casefold()
+    return text not in {"", "-", "—", "нет", "n/a", "na", "nan", "none"}
+
+
+def _is_positive_finite(value: Any) -> bool:
+    try:
+        return not pd.isna(value) and math.isfinite(float(value)) and float(value) > 0
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _is_non_negative_finite(value: Any) -> bool:
+    try:
+        return not pd.isna(value) and math.isfinite(float(value)) and float(value) >= 0
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def _normalize_sku(value: Any) -> str | None:
@@ -372,6 +478,9 @@ class CatalogMatcher:
         self.catalog_records: list[dict[str, Any]] = []
         self.normalized_catalog_names: list[str] = []
         self.catalog_attributes: list[dict[str, Any]] = []
+        self.catalog_source_rows = 0
+        self.catalog_skipped_rows = 0
+        self.catalog_header_rows_skipped = 0
         self._token_index: dict[str, set[int]] = defaultdict(set)
         if catalog_df is not None:
             self.load_catalog(catalog_df)
@@ -392,16 +501,11 @@ class CatalogMatcher:
     def load_catalog(self, source: pd.DataFrame) -> None:
         if not isinstance(source, pd.DataFrame) or source.empty:
             raise CatalogSchemaError("Справочник пуст.")
-        if source.columns.duplicated().any():
-            raise CatalogSchemaError("В справочнике есть колонки с одинаковыми названиями.")
 
-        frame = source.copy()
+        frame, header_rows_skipped = _promote_embedded_header(source.copy())
+        source_rows = len(frame)
         mapping: dict[Any, str] = {}
-        targets: dict[str, list[Any]] = defaultdict(list)
-        for column in frame.columns:
-            target = _canonical_header(column)
-            if target:
-                targets[target].append(column)
+        targets = _header_targets(frame.columns)
         ambiguous = {target: cols for target, cols in targets.items() if len(cols) > 1}
         if ambiguous:
             details = "; ".join(
@@ -415,6 +519,8 @@ class CatalogMatcher:
         missing = sorted(REQUIRED_COLUMNS - set(frame.columns))
         if missing:
             raise CatalogSchemaError("Не найдены обязательные колонки: " + ", ".join(missing))
+        if not PRICE_COLUMNS & set(frame.columns):
+            raise CatalogSchemaError("Не найдена колонка с ценой продажи или промо-ценой.")
         for optional in OPTIONAL_COLUMNS:
             if optional not in frame.columns:
                 frame[optional] = None
@@ -432,6 +538,26 @@ class CatalogMatcher:
         ].copy()
 
         frame = frame.dropna(axis=0, how="all").copy()
+        has_any_price_value = pd.DataFrame(
+            {
+                column: frame[column].map(_has_source_value)
+                for column in ("цена_закупки", "цена_продажи", "цена_на_промо")
+            }
+        ).any(axis=1)
+        repeated_header = (
+            frame["код_товара"].map(_canonical_header).eq("код_товара")
+            & frame["наименование_товара"].map(_canonical_header).eq("наименование_товара")
+            & (
+                frame["цена_продажи"].map(_canonical_header).eq("цена_продажи")
+                | frame["цена_на_промо"].map(_canonical_header).eq("цена_на_промо")
+            )
+        )
+        accepted_row = has_any_price_value & ~repeated_header
+        skipped_rows = int((~accepted_row).sum())
+        frame = frame.loc[accepted_row].copy()
+        if frame.empty:
+            raise CatalogSchemaError("В справочнике не найдено товарных строк с ценами.")
+
         frame["код_товара"] = frame["код_товара"].map(_normalize_sku)
         frame["наименование_товара"] = frame["наименование_товара"].map(
             lambda value: "" if pd.isna(value) else str(value).strip()[:500]
@@ -448,22 +574,35 @@ class CatalogMatcher:
             )
 
         for column in ("цена_закупки", "цена_продажи", "цена_на_промо"):
-            frame[column] = pd.to_numeric(frame[column].map(_localized_number), errors="coerce")
-            finite_mask = frame[column].map(
-                lambda value: pd.isna(value) or math.isfinite(float(value))
+            present_mask = frame[column].map(_has_source_value)
+            numeric = pd.to_numeric(frame[column].map(_localized_number), errors="coerce")
+            positive_mask = numeric.map(_is_positive_finite)
+            valid_explicit = numeric.map(_is_non_negative_finite)
+            invalid_explicit = present_mask & ~valid_explicit
+            if invalid_explicit.any():
+                raise CatalogSchemaError(
+                    f"Колонка «{column}» содержит некорректную цену "
+                    f"у {int(invalid_explicit.sum())} товарных строк."
+                )
+            frame[column] = numeric.where(positive_mask, None)
+
+        missing_effective_price = frame["цена_продажи"].isna() & frame["цена_на_промо"].isna()
+        if missing_effective_price.any():
+            raise CatalogSchemaError(
+                "У части товарных строк отсутствует положительная цена продажи или промо-цена."
             )
-            if not finite_mask.all():
-                raise CatalogSchemaError(f"Колонка «{column}» содержит бесконечные значения.")
-            if (frame[column].dropna() < 0).any():
-                raise CatalogSchemaError(f"Колонка «{column}» содержит отрицательные цены.")
-            frame.loc[frame[column] == 0, column] = None
-        if frame["цена_продажи"].isna().any():
-            raise CatalogSchemaError("У части товаров отсутствует положительная цена продажи.")
 
         frame["_norm_name"] = frame["наименование_товара"].map(normalize_product_text)
         frame["_attrs"] = frame["наименование_товара"].map(extract_attributes)
+        self.catalog_source_rows = source_rows
+        self.catalog_skipped_rows = skipped_rows
+        self.catalog_header_rows_skipped = header_rows_skipped
         self.catalog_df = frame.reset_index(drop=True)
         self.catalog_records = self.catalog_df.to_dict(orient="records")
+        for record in self.catalog_records:
+            for column in ("цена_закупки", "цена_продажи", "цена_на_промо"):
+                if pd.isna(record[column]):
+                    record[column] = None
         self.normalized_catalog_names = self.catalog_df["_norm_name"].tolist()
         self.catalog_attributes = self.catalog_df["_attrs"].tolist()
 

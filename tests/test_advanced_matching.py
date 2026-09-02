@@ -178,3 +178,218 @@ def test_catalog_rejects_ambiguous_or_missing_columns() -> None:
         CatalogMatcher(pd.DataFrame([{"sku": "1", "name": "Товар", "price": 10, "sale_price": 11}]))
     with pytest.raises(CatalogSchemaError, match="обязательные"):
         CatalogMatcher(pd.DataFrame([{"sku": "1", "sale_price": 10}]))
+
+
+def test_x5_headers_and_unpriced_section_rows_are_supported() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "Код": "100000",
+                "Номенклатура": "БАКАЛЕЯ",
+                "Закуп": None,
+                "Цена продажи": None,
+                "Промо": None,
+            },
+            {
+                "Код": "100001",
+                "Номенклатура": "Крупа гречневая 800 г",
+                "Закуп": 0,
+                "Цена продажи": "79,90",
+                "Промо": "69,90",
+            },
+        ]
+    )
+
+    matcher = CatalogMatcher(frame)
+
+    assert matcher.catalog_source_rows == 2
+    assert matcher.catalog_skipped_rows == 1
+    assert matcher.catalog_header_rows_skipped == 0
+    assert len(matcher.catalog_records) == 1
+    assert matcher.catalog_records[0]["код_товара"] == "100001"
+    assert matcher.catalog_records[0]["цена_закупки"] is None
+    assert matcher.catalog_records[0]["цена_продажи"] == pytest.approx(79.9)
+    assert matcher.catalog_records[0]["цена_на_промо"] == pytest.approx(69.9)
+
+
+def test_catalog_finds_decorated_embedded_header_and_skips_repeated_header() -> None:
+    frame = pd.DataFrame(
+        [
+            ["Отчёт по магазинам", None, None, None, None],
+            ["\ufeffКод", "Номенклатура товара", "Закуп, ₽", "Цена продажи,\nруб.", "Промо ₽"],
+            ["Код", "Номенклатура", "Закуп", "Цена продажи", "Промо"],
+            ["000123", "Чай чёрный 100 г", "100", "149,90", None],
+        ],
+        columns=[f"Неизвестная колонка {index}" for index in range(5)],
+    )
+
+    matcher = CatalogMatcher(frame)
+
+    assert matcher.catalog_header_rows_skipped == 2
+    assert matcher.catalog_source_rows == 2
+    assert matcher.catalog_skipped_rows == 1
+    assert matcher.catalog_records[0]["код_товара"] == "000123"
+    assert matcher.catalog_records[0]["наименование_товара"] == "Чай чёрный 100 г"
+    assert matcher.catalog_records[0]["цена_продажи"] == pytest.approx(149.9)
+
+
+def test_catalog_allows_unknown_duplicate_columns() -> None:
+    frame = pd.DataFrame(
+        [["1", "Товар", 10, "первый", "второй"]],
+        columns=["SKU", "Product_Name", "Sale_Price", "Комментарий", "Комментарий"],
+    )
+
+    assert CatalogMatcher(frame).catalog_records[0]["код_товара"] == "1"
+
+
+def test_catalog_ignores_extra_ordinal_position_column() -> None:
+    matcher = CatalogMatcher(
+        pd.DataFrame(
+            [
+                {
+                    "Код": "1",
+                    "Позиция": 17,
+                    "Номенклатура": "Товар",
+                    "Цена продажи": 100,
+                }
+            ]
+        )
+    )
+
+    assert matcher.catalog_records[0]["наименование_товара"] == "Товар"
+
+
+def test_catalog_accepts_promo_price_when_regular_price_column_is_absent() -> None:
+    matcher = CatalogMatcher(
+        pd.DataFrame([{"Код": "1", "Номенклатура": "Товар", "Промо": "49,90"}])
+    )
+
+    assert matcher.catalog_records[0]["цена_продажи"] is None
+    assert matcher.catalog_records[0]["цена_на_промо"] == pytest.approx(49.9)
+
+
+@pytest.mark.parametrize("column", ["Цена продажи", "Промо"])
+@pytest.mark.parametrize("bad_price", [-1, float("inf"), "по запросу"])
+def test_catalog_rejects_explicit_invalid_comparison_prices(column: str, bad_price: object) -> None:
+    row = {
+        "Код": "1",
+        "Номенклатура": "Товар",
+        "Цена продажи": 100,
+        "Промо": 90,
+    }
+    row[column] = bad_price
+    with pytest.raises(CatalogSchemaError, match="некорректную цену"):
+        CatalogMatcher(pd.DataFrame([row]))
+
+
+@pytest.mark.parametrize(
+    ("sale_price", "promo_price", "expected_sale", "expected_promo"),
+    [
+        (100, 0, 100, None),
+        (0, 80, None, 80),
+    ],
+)
+def test_catalog_treats_zero_as_an_absent_price(
+    sale_price: float,
+    promo_price: float,
+    expected_sale: float | None,
+    expected_promo: float | None,
+) -> None:
+    matcher = CatalogMatcher(
+        pd.DataFrame(
+            [
+                {
+                    "Код": "1",
+                    "Номенклатура": "Товар",
+                    "Цена продажи": sale_price,
+                    "Промо": promo_price,
+                }
+            ]
+        )
+    )
+
+    assert matcher.catalog_records[0]["цена_продажи"] == expected_sale
+    assert matcher.catalog_records[0]["цена_на_промо"] == expected_promo
+
+
+def test_catalog_rejects_row_without_any_positive_comparison_price() -> None:
+    with pytest.raises(CatalogSchemaError, match="положительная цена"):
+        CatalogMatcher(pd.DataFrame([{"Код": "1", "Номенклатура": "Товар", "Цена продажи": 0}]))
+
+
+@pytest.mark.parametrize("bad_purchase", [-1, float("inf"), "неизвестно"])
+def test_catalog_rejects_explicit_invalid_purchase_price(bad_purchase: object) -> None:
+    with pytest.raises(CatalogSchemaError, match="некорректную цену"):
+        CatalogMatcher(
+            pd.DataFrame(
+                [
+                    {
+                        "Код": "1",
+                        "Номенклатура": "Товар",
+                        "Закуп": bad_purchase,
+                        "Цена продажи": 100,
+                    }
+                ]
+            )
+        )
+
+
+def test_failed_catalog_reload_keeps_previous_records_and_stats() -> None:
+    matcher = CatalogMatcher(
+        pd.DataFrame(
+            [
+                {"Код": "10", "Номенклатура": "РАЗДЕЛ", "Цена продажи": None},
+                {"Код": "11", "Номенклатура": "Товар", "Цена продажи": 100},
+            ]
+        )
+    )
+
+    with pytest.raises(CatalogSchemaError):
+        matcher.load_catalog(
+            pd.DataFrame([{"Код": "20", "Номенклатура": "РАЗДЕЛ", "Цена продажи": None}])
+        )
+
+    assert [record["код_товара"] for record in matcher.catalog_records] == ["11"]
+    assert matcher.catalog_source_rows == 2
+    assert matcher.catalog_skipped_rows == 1
+    assert matcher.catalog_header_rows_skipped == 0
+
+
+def test_catalog_rejects_priced_rows_without_identity() -> None:
+    with pytest.raises(CatalogSchemaError, match="нет SKU или наименования"):
+        CatalogMatcher(pd.DataFrame([{"Код": None, "Номенклатура": "Товар", "Цена продажи": 100}]))
+
+
+def test_catalog_rejects_catalog_containing_only_section_rows() -> None:
+    with pytest.raises(CatalogSchemaError, match="не найдено товарных строк"):
+        CatalogMatcher(
+            pd.DataFrame([{"Код": "100000", "Номенклатура": "БАКАЛЕЯ", "Цена продажи": None}])
+        )
+
+
+def test_catalog_still_rejects_duplicate_product_skus() -> None:
+    with pytest.raises(CatalogSchemaError, match="повторяются SKU"):
+        CatalogMatcher(
+            pd.DataFrame(
+                [
+                    {"Код": "1", "Номенклатура": "Первый товар", "Цена продажи": 100},
+                    {"Код": "1", "Номенклатура": "Второй товар", "Цена продажи": 110},
+                ]
+            )
+        )
+
+
+def test_broad_header_names_are_not_guessed() -> None:
+    with pytest.raises(CatalogSchemaError, match="обязательные"):
+        CatalogMatcher(
+            pd.DataFrame(
+                [
+                    {
+                        "Штрихкод": "123",
+                        "Код категории": "10",
+                        "Название категории": "Чай",
+                        "Цена конкурента": 100,
+                    }
+                ]
+            )
+        )

@@ -26,7 +26,7 @@ def _parse_confidence(value: Any) -> float | None:
 
 
 def process_monitoring_batch(
-    catalog: pd.DataFrame,
+    catalog: pd.DataFrame | CatalogMatcher,
     images: list[dict[str, Any]],
     extractor: PriceTagExtractor,
     *,
@@ -37,7 +37,7 @@ def process_monitoring_batch(
 ) -> list[dict[str, Any]]:
     """Выполнить полный пайплайн и не смешивать ошибки OCR с товарами."""
 
-    matcher = CatalogMatcher(catalog)
+    matcher = catalog if isinstance(catalog, CatalogMatcher) else CatalogMatcher(catalog)
     recognized = extractor.extract_batch(
         images,
         max_workers=max_workers,

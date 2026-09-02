@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pandas as pd
 from PIL import Image
 from streamlit.testing.v1 import AppTest
 
@@ -50,6 +51,30 @@ def _gemini_response() -> Mock:
         ]
     }
     return response
+
+
+def _x5_catalog_bytes() -> bytes:
+    frame = pd.DataFrame(
+        [
+            {
+                "Код": "100000",
+                "Номенклатура": "МОЛОЧНАЯ ПРОДУКЦИЯ",
+                "Закуп": None,
+                "Цена продажи": None,
+                "Промо": None,
+            },
+            {
+                "Код": "104921",
+                "Номенклатура": "Молоко Домик в деревне ультрапастеризованное 3.2% 930мл",
+                "Закуп": 80,
+                "Цена продажи": 109.9,
+                "Промо": 89.9,
+            },
+        ]
+    )
+    buffer = io.BytesIO()
+    frame.to_excel(buffer, index=False)
+    return buffer.getvalue()
 
 
 def _button_by_label(app: AppTest, label_fragment: str):
@@ -140,6 +165,41 @@ def test_streamlit_is_public_without_password(monkeypatch) -> None:
     assert not any(element.label == "Войти" for element in app.button)
     assert not any(element.label == "Выйти" for element in app.button)
     assert len(app.get("text_input")) == 0
+
+
+def test_streamlit_accepts_x5_catalog_and_reports_skipped_rows(monkeypatch) -> None:
+    _configure_test_app(monkeypatch)
+    app = AppTest.from_file(APP_PATH, default_timeout=30).run()
+
+    app.tabs[0].file_uploader[0].upload(
+        "Мониторинг Х5.xlsx",
+        _x5_catalog_bytes(),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    app.run()
+
+    assert not app.exception
+    assert not app.error
+    matcher = app.session_state["catalog_matcher"]
+    assert matcher.catalog_source_rows == 2
+    assert len(matcher.catalog_records) == 1
+    assert matcher.catalog_skipped_rows == 1
+    assert [record["код_товара"] for record in matcher.catalog_records] == ["104921"]
+    preview = app.tabs[0].dataframe[0].value
+    assert list(preview.columns) == [
+        "код_товара",
+        "наименование_товара",
+        "цена_закупки",
+        "цена_продажи",
+        "цена_на_промо",
+    ]
+    assert len(preview) == 1
+    assert preview.iloc[0]["код_товара"] == "104921"
+    assert any(
+        "Принято товарных позиций: 1 · пропущено строк без цен/повторных заголовков: 1"
+        in success.value
+        for success in app.tabs[0].success
+    )
 
 
 def test_streamlit_ignores_legacy_password_setting(monkeypatch) -> None:

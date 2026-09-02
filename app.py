@@ -100,6 +100,14 @@ def _invalidate_results() -> None:
     st.session_state["analysis_finished_at"] = None
 
 
+def _clear_catalog_state() -> None:
+    st.session_state["catalog_df"] = None
+    st.session_state["catalog_fingerprint"] = None
+    st.session_state["catalog_filename"] = None
+    st.session_state["catalog_matcher"] = None
+    _invalidate_results()
+
+
 def _reset_analysis() -> None:
     for key in (
         "catalog_df",
@@ -141,7 +149,8 @@ def _render_upload(settings: AppSettings) -> None:
         st.markdown("#### 1. Справочник Самбери")
         st.caption(
             "CSV/TSV или Excel (XLS, XLSX, XLSM, XLSB, шаблоны и ODS): "
-            "SKU, наименование, закупочная, регулярная и промо-цена."
+            "нужны SKU, наименование и регулярная или промо-цена; закупочная необязательна. "
+            "Справочник нормализуется локально, Gemini получает только фотографии."
         )
         catalog_file = st.file_uploader(
             "Справочник",
@@ -153,24 +162,22 @@ def _render_upload(settings: AppSettings) -> None:
             declared_size = int(getattr(catalog_file, "size", 0) or 0)
             if declared_size > MAX_CATALOG_BYTES:
                 st.error(f"Справочник больше {MAX_CATALOG_BYTES // (1024 * 1024)} МБ.")
-                st.session_state["catalog_df"] = None
-                st.session_state["catalog_fingerprint"] = None
-                st.session_state["catalog_filename"] = None
-                _invalidate_results()
+                _clear_catalog_state()
                 data = b""
             else:
                 data = bytes(catalog_file.getvalue())
-            fingerprint = hashlib.sha256(data).hexdigest()
+                if not data:
+                    st.error("Файл справочника пуст.")
+                    _clear_catalog_state()
+            fingerprint = hashlib.sha256(
+                str(catalog_file.name).encode("utf-8", errors="replace") + b"\0" + data
+            ).hexdigest()
             if data and fingerprint != st.session_state.catalog_fingerprint:
                 try:
                     frame = _parse_catalog(data, catalog_file.name)
                     matcher = CatalogMatcher(frame)  # Проверяем схему до дорогостоящего OCR.
                 except (InputValidationError, CatalogSchemaError) as exc:
-                    st.session_state["catalog_df"] = None
-                    st.session_state["catalog_fingerprint"] = None
-                    st.session_state["catalog_filename"] = None
-                    st.session_state["catalog_matcher"] = None
-                    _invalidate_results()
+                    _clear_catalog_state()
                     st.error(str(exc))
                 else:
                     st.session_state["catalog_df"] = frame
@@ -179,16 +186,35 @@ def _render_upload(settings: AppSettings) -> None:
                     st.session_state["catalog_matcher"] = matcher
                     _invalidate_results()
             frame = st.session_state.catalog_df
-            if isinstance(frame, pd.DataFrame):
-                st.success(f"Загружено: {len(frame):,} SKU")
+            matcher = st.session_state.get("catalog_matcher")
+            if isinstance(frame, pd.DataFrame) and isinstance(matcher, CatalogMatcher):
+                status = f"Принято товарных позиций: {len(matcher.catalog_records):,}"
+                if matcher.catalog_skipped_rows:
+                    status += (
+                        " · пропущено строк без цен/повторных заголовков: "
+                        f"{matcher.catalog_skipped_rows:,}"
+                    )
+                st.success(status)
+                if matcher.catalog_header_rows_skipped:
+                    st.caption(
+                        "Шапка таблицы найдена автоматически; до начала данных пропущено строк: "
+                        f"{matcher.catalog_header_rows_skipped:,}."
+                    )
                 with st.expander("Предпросмотр справочника"):
-                    st.dataframe(frame.head(10), width="stretch", hide_index=True)
+                    preview_columns = [
+                        "код_товара",
+                        "наименование_товара",
+                        "цена_закупки",
+                        "цена_продажи",
+                        "цена_на_промо",
+                    ]
+                    st.dataframe(
+                        matcher.catalog_df[preview_columns].head(10),
+                        width="stretch",
+                        hide_index=True,
+                    )
         elif st.session_state.catalog_fingerprint is not None:
-            st.session_state["catalog_df"] = None
-            st.session_state["catalog_fingerprint"] = None
-            st.session_state["catalog_filename"] = None
-            st.session_state["catalog_matcher"] = None
-            _invalidate_results()
+            _clear_catalog_state()
 
     with right:
         st.markdown("#### 2. Фотографии ценников")
@@ -216,7 +242,10 @@ def _render_upload(settings: AppSettings) -> None:
         if photo_files:
             st.success(f"Выбрано файлов: {len(photo_files)}")
 
-    catalog_ready = isinstance(st.session_state.catalog_df, pd.DataFrame)
+    catalog_matcher = st.session_state.get("catalog_matcher")
+    catalog_ready = isinstance(st.session_state.catalog_df, pd.DataFrame) and isinstance(
+        catalog_matcher, CatalogMatcher
+    )
     photos_ready = bool(photo_files) and upload_error is None
     api_ready = bool(settings.gemini_api_key)
     if not api_ready:
@@ -272,7 +301,7 @@ def _render_upload(settings: AppSettings) -> None:
         started = time.monotonic()
         try:
             processed = process_monitoring_batch(
-                st.session_state.catalog_df,
+                catalog_matcher,
                 images,
                 extractor,
                 match_threshold=settings.match_threshold,
