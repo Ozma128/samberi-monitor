@@ -14,6 +14,7 @@ import streamlit as st
 from core.analytics import calculate_price_metrics, summarize_price_index
 from core.exporter import export_comparison_to_excel
 from core.input_validation import (
+    CATALOG_UPLOAD_EXTENSIONS,
     MAX_CATALOG_BYTES,
     MAX_IMAGES,
     MAX_TOTAL_PREVIEW_BYTES,
@@ -138,10 +139,13 @@ def _render_upload(settings: AppSettings) -> None:
     left, right = st.columns(2, gap="large")
     with left:
         st.markdown("#### 1. Справочник Самбери")
-        st.caption("CSV или XLSX: SKU, наименование, закупочная, регулярная и промо-цена.")
+        st.caption(
+            "CSV/TSV или Excel (XLS, XLSX, XLSM, XLSB, шаблоны и ODS): "
+            "SKU, наименование, закупочная, регулярная и промо-цена."
+        )
         catalog_file = st.file_uploader(
             "Справочник",
-            type=["csv", "xlsx"],
+            type=list(CATALOG_UPLOAD_EXTENSIONS),
             key="catalog_uploader",
             label_visibility="collapsed",
         )
@@ -748,9 +752,7 @@ except (TypeError, ValueError, OverflowError):
 _initialize_state()
 
 st.title("🛒 Самбери: Мониторинг ценников")
-st.caption(
-    f"Gemini Vision · {settings.gemini_model} · строгий матчинг фасовок · проверяемый Excel"
-)
+st.caption(f"Gemini Vision · {settings.gemini_model} · строгий матчинг фасовок · проверяемый Excel")
 
 upload_tab, table_tab, analytics_tab, export_tab = st.tabs(
     ["📸 Загрузка", "📋 Таблица", "📊 Аналитика", "📥 Excel"]

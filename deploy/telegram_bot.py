@@ -26,6 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from core.analytics import summarize_price_index  # noqa: E402
 from core.exporter import export_comparison_to_excel  # noqa: E402
 from core.input_validation import (  # noqa: E402
+    ALLOWED_CATALOG_SUFFIXES,
     MAX_IMAGE_BYTES,
     MAX_TOTAL_IMAGE_BYTES,
     InputValidationError,
@@ -407,8 +408,10 @@ def load_bot_config(environ: Mapping[str, str] | None = None) -> BotConfig:
         catalog_path = catalog_path.resolve(strict=True)
     except (OSError, RuntimeError, ValueError) as exc:
         raise BotConfigurationError("SAMBERI_CATALOG_PATH не найден.") from exc
-    if not catalog_path.is_file() or catalog_path.suffix.lower() not in {".csv", ".xlsx"}:
-        raise BotConfigurationError("SAMBERI_CATALOG_PATH должен указывать на файл CSV или XLSX.")
+    if not catalog_path.is_file() or catalog_path.suffix.lower() not in ALLOWED_CATALOG_SUFFIXES:
+        raise BotConfigurationError(
+            "SAMBERI_CATALOG_PATH должен указывать на CSV/TSV или поддерживаемую книгу Excel."
+        )
 
     model = str(values.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL) or "").strip()
     if not re.fullmatch(r"gemini-[a-z0-9.-]{1,80}", model):

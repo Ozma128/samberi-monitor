@@ -62,12 +62,110 @@ def test_catalog_csv_supports_semicolon_and_cp1251() -> None:
     assert CatalogMatcher(frame).catalog_records[0]["цена_продажи"] == pytest.approx(1234.56)
 
 
+def test_catalog_tsv_supports_utf8_and_preserves_sku() -> None:
+    raw = "sku\tнаименование\tцена\n0007\tКефир\t89,90\n".encode()
+    frame = load_catalog_file(raw, "catalog.tsv")
+    assert frame.iloc[0, 0] == "0007"
+    assert CatalogMatcher(frame).catalog_records[0]["цена_продажи"] == pytest.approx(89.9)
+
+
 def test_catalog_xlsx_and_extension_validation() -> None:
     buffer = io.BytesIO()
-    pd.DataFrame([{"sku": "1", "name": "Товар", "price": 10}]).to_excel(buffer, index=False)
-    assert len(load_catalog_file(buffer.getvalue(), "catalog.xlsx")) == 1
-    with pytest.raises(InputValidationError, match="только"):
-        load_catalog_file(b"data", "catalog.xls")
+    pd.DataFrame([{"sku": "0001", "name": "Товар", "price": 10}]).to_excel(buffer, index=False)
+    for suffix in (".xlsx", ".xlsm", ".xltx", ".xltm"):
+        frame = load_catalog_file(buffer.getvalue(), f"catalog{suffix}")
+        assert frame.iloc[0, 0] == "0001"
+
+    with pytest.raises(InputValidationError, match="Поддерживаются"):
+        load_catalog_file(b"data", "catalog.xml")
+
+
+def _zip_bytes(files: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("suffix", "data", "expected_engine"),
+    [
+        (".xls", input_validation.OLE_COMPOUND_FILE_MAGIC + b"test", "xlrd"),
+        (".xlt", b"\x09\x08test", "xlrd"),
+        (
+            ".xlsb",
+            _zip_bytes({"[Content_Types].xml": b"types", "xl/workbook.bin": b"book"}),
+            "calamine",
+        ),
+        (
+            ".ods",
+            _zip_bytes(
+                {
+                    "mimetype": b"application/vnd.oasis.opendocument.spreadsheet",
+                    "content.xml": b"content",
+                }
+            ),
+            "calamine",
+        ),
+    ],
+)
+def test_catalog_binary_formats_use_explicit_safe_engine(
+    monkeypatch: pytest.MonkeyPatch,
+    suffix: str,
+    data: bytes,
+    expected_engine: str,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_read_excel(*_args: object, **kwargs: object) -> pd.DataFrame:
+        calls.append(kwargs)
+        return pd.DataFrame([{"sku": "0001", "name": "Товар", "price": "10"}])
+
+    monkeypatch.setattr(pd, "read_excel", fake_read_excel)
+    frame = load_catalog_file(data, f"catalog{suffix}")
+    assert frame.iloc[0, 0] == "0001"
+    assert calls == [
+        {
+            "engine": expected_engine,
+            "nrows": input_validation.MAX_CATALOG_ROWS + 1,
+            "dtype": str,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("filename", "data"),
+    [
+        ("fake.xls", b"<html><table><tr><td>not excel</td></tr></table></html>"),
+        ("fake.xlsx", _zip_bytes({"payload.txt": b"not excel"})),
+        (
+            "fake.xlsb",
+            _zip_bytes({"[Content_Types].xml": b"types", "xl/workbook.xml": b"wrong"}),
+        ),
+        (
+            "fake.ods",
+            _zip_bytes({"mimetype": b"text/plain", "content.xml": b"wrong"}),
+        ),
+    ],
+)
+def test_catalog_rejects_mislabeled_spreadsheets(filename: str, data: bytes) -> None:
+    with pytest.raises(InputValidationError, match="формат"):
+        load_catalog_file(data, filename)
+
+
+def test_catalog_zip_expansion_budget_applies_to_excel_variants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(input_validation, "MAX_SPREADSHEET_UNCOMPRESSED_BYTES", 20)
+    data = _zip_bytes(
+        {
+            "[Content_Types].xml": b"types",
+            "xl/workbook.xml": b"0" * 50,
+        }
+    )
+    with pytest.raises(InputValidationError, match="Распакованный размер"):
+        load_catalog_file(data, "catalog.xlsm")
 
 
 def test_catalog_cell_budget_is_enforced(monkeypatch: pytest.MonkeyPatch) -> None:

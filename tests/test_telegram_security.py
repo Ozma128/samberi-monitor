@@ -94,8 +94,12 @@ def test_load_bot_config_requires_allowlist(tmp_path: Path):
         )
 
 
-def test_load_bot_config_accepts_explicit_catalog_and_allowlist(tmp_path: Path):
-    catalog = tmp_path / "catalog.xlsx"
+@pytest.mark.parametrize(
+    "suffix",
+    [".csv", ".tsv", ".xls", ".xlsx", ".xlsm", ".xlsb", ".xlt", ".xltx", ".xltm", ".ods"],
+)
+def test_load_bot_config_accepts_explicit_catalog_and_allowlist(tmp_path: Path, suffix: str):
+    catalog = tmp_path / f"catalog{suffix}"
     catalog.touch()
 
     config = load_bot_config(

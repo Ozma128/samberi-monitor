@@ -125,6 +125,18 @@ def test_streamlit_is_public_without_password(monkeypatch) -> None:
     assert not app.warning
     assert len(app.tabs) == 4
     assert len(app.tabs[0].file_uploader) == 2
+    assert set(app.tabs[0].file_uploader[0].proto.type) == {
+        ".csv",
+        ".tsv",
+        ".xls",
+        ".xlsx",
+        ".xlsm",
+        ".xlsb",
+        ".xlt",
+        ".xltx",
+        ".xltm",
+        ".ods",
+    }
     assert not any(element.label == "Войти" for element in app.button)
     assert not any(element.label == "Выйти" for element in app.button)
     assert len(app.get("text_input")) == 0

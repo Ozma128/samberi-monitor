@@ -27,8 +27,8 @@ MAX_CATALOG_ROWS = 100_000
 MAX_CATALOG_COLUMNS = 100
 MAX_CATALOG_CELLS = 2_000_000
 MAX_CATALOG_MEMORY_BYTES = 64 * MIB
-MAX_XLSX_UNCOMPRESSED_BYTES = 75 * MIB
-MAX_XLSX_MEMBERS = 10_000
+MAX_SPREADSHEET_UNCOMPRESSED_BYTES = 75 * MIB
+MAX_SPREADSHEET_MEMBERS = 10_000
 
 MAX_ARCHIVE_BYTES = 75 * MIB
 MAX_ARCHIVE_MEMBERS = 500
@@ -46,6 +46,28 @@ MAX_COMPRESSION_RATIO = 200.0
 
 ALLOWED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG"}
+
+CATALOG_UPLOAD_EXTENSIONS = (
+    "csv",
+    "tsv",
+    "xls",
+    "xlsx",
+    "xlsm",
+    "xlsb",
+    "xlt",
+    "xltx",
+    "xltm",
+    "ods",
+)
+ALLOWED_CATALOG_SUFFIXES = frozenset(f".{item}" for item in CATALOG_UPLOAD_EXTENSIONS)
+DELIMITED_CATALOG_SUFFIXES = frozenset({".csv", ".tsv"})
+OLE_CATALOG_SUFFIXES = frozenset({".xls", ".xlt"})
+ZIP_CATALOG_SUFFIXES = ALLOWED_CATALOG_SUFFIXES - (
+    DELIMITED_CATALOG_SUFFIXES | OLE_CATALOG_SUFFIXES
+)
+
+OLE_COMPOUND_FILE_MAGIC = bytes.fromhex("D0CF11E0A1B11AE1")
+RAW_BIFF_MAGIC_PREFIXES = (b"\x09\x00", b"\x09\x02", b"\x09\x04", b"\x09\x08")
 
 
 class InputValidationError(ValueError):
@@ -142,15 +164,15 @@ def _validate_zip_metadata(
     return members
 
 
-def _read_csv(data: bytes) -> pd.DataFrame:
+def _read_delimited(data: bytes, suffix: str) -> pd.DataFrame:
     last_error: Exception | None = None
     for encoding in ("utf-8-sig", "cp1251"):
         try:
             return pd.read_csv(
                 io.BytesIO(data),
                 encoding=encoding,
-                sep=None,
-                engine="python",
+                sep="\t" if suffix == ".tsv" else None,
+                engine="python" if suffix == ".csv" else "c",
                 nrows=MAX_CATALOG_ROWS + 1,
                 dtype=str,
             )
@@ -159,18 +181,87 @@ def _read_csv(data: bytes) -> pd.DataFrame:
         except pd.errors.ParserError as exc:
             last_error = exc
     raise InputValidationError(
-        "Не удалось разобрать CSV (ожидается UTF-8 или Windows-1251)."
+        "Не удалось разобрать CSV/TSV (ожидается UTF-8 или Windows-1251)."
     ) from last_error
 
 
+def _validate_spreadsheet_container(data: bytes, suffix: str) -> None:
+    """Проверить реальный контейнер книги до запуска Excel-парсера."""
+
+    if suffix in OLE_CATALOG_SUFFIXES:
+        if not data.startswith((OLE_COMPOUND_FILE_MAGIC, *RAW_BIFF_MAGIC_PREFIXES)):
+            raise InputValidationError(
+                "Файл XLS/XLT повреждён, зашифрован или имеет неверный формат."
+            )
+        return
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            members = _validate_zip_metadata(
+                archive,
+                max_members=MAX_SPREADSHEET_MEMBERS,
+                max_uncompressed_bytes=MAX_SPREADSHEET_UNCOMPRESSED_BYTES,
+                max_ratio=None,
+            )
+            names = {member.filename for member in members}
+            if suffix == ".ods":
+                if "mimetype" not in names or "content.xml" not in names:
+                    raise InputValidationError(
+                        "Файл ODS повреждён, зашифрован или имеет неверный формат."
+                    )
+                mime = archive.read("mimetype", pwd=None)
+                if mime.strip() != b"application/vnd.oasis.opendocument.spreadsheet":
+                    raise InputValidationError("Файл имеет неверный формат ODS.")
+            else:
+                workbook_part = "xl/workbook.bin" if suffix == ".xlsb" else "xl/workbook.xml"
+                if "[Content_Types].xml" not in names or workbook_part not in names:
+                    raise InputValidationError(
+                        "Файл Excel повреждён, зашифрован или имеет неверный формат."
+                    )
+    except InputValidationError:
+        raise
+    except (KeyError, RuntimeError, zipfile.BadZipFile, OSError) as exc:
+        raise InputValidationError(
+            "Файл Excel/ODS повреждён, зашифрован или имеет неверный формат."
+        ) from exc
+
+
+def _read_spreadsheet(data: bytes, suffix: str) -> pd.DataFrame:
+    _validate_spreadsheet_container(data, suffix)
+    if suffix in {".xlsx", ".xlsm", ".xltx", ".xltm"}:
+        engine = "openpyxl"
+    elif suffix in OLE_CATALOG_SUFFIXES:
+        engine = "xlrd"
+    else:
+        engine = "calamine"
+    try:
+        return pd.read_excel(
+            io.BytesIO(data),
+            engine=engine,
+            nrows=MAX_CATALOG_ROWS + 1,
+            dtype=str,
+        )
+    except ImportError as exc:
+        raise InputValidationError(
+            "На сервере не установлен компонент чтения этого формата Excel."
+        ) from exc
+    except Exception as exc:
+        raise InputValidationError(
+            "Не удалось прочитать книгу Excel/ODS: файл повреждён, зашифрован "
+            "или не содержит поддерживаемой таблицы."
+        ) from exc
+
+
 def load_catalog_file(file_or_bytes: Any, filename: str | None = None) -> pd.DataFrame:
-    """Загрузить и ограничить каталог CSV/XLSX."""
+    """Загрузить и ограничить каталог из текстовой таблицы или книги Excel."""
 
     name = filename or getattr(file_or_bytes, "name", "catalog")
     safe_name = _safe_basename(name, "catalog")
     suffix = PurePosixPath(safe_name).suffix.lower()
-    if suffix not in {".csv", ".xlsx"}:
-        raise InputValidationError("Поддерживаются только файлы .csv и .xlsx.")
+    if suffix not in ALLOWED_CATALOG_SUFFIXES:
+        raise InputValidationError(
+            "Поддерживаются CSV, TSV, XLS, XLSX, XLSM, XLSB, XLT, XLTX, XLTM и ODS."
+        )
 
     data = _read_all(file_or_bytes)
     if not data:
@@ -179,22 +270,10 @@ def load_catalog_file(file_or_bytes: Any, filename: str | None = None) -> pd.Dat
         raise InputValidationError(f"Справочник больше {MAX_CATALOG_BYTES // MIB} МБ.")
 
     try:
-        if suffix == ".csv":
-            frame = _read_csv(data)
+        if suffix in DELIMITED_CATALOG_SUFFIXES:
+            frame = _read_delimited(data, suffix)
         else:
-            try:
-                with zipfile.ZipFile(io.BytesIO(data)) as archive:
-                    _validate_zip_metadata(
-                        archive,
-                        max_members=MAX_XLSX_MEMBERS,
-                        max_uncompressed_bytes=MAX_XLSX_UNCOMPRESSED_BYTES,
-                        max_ratio=None,
-                    )
-            except (zipfile.BadZipFile, OSError) as exc:
-                raise InputValidationError(
-                    "Файл XLSX повреждён или имеет неверный формат."
-                ) from exc
-            frame = pd.read_excel(io.BytesIO(data), nrows=MAX_CATALOG_ROWS + 1)
+            frame = _read_spreadsheet(data, suffix)
     except InputValidationError:
         raise
     except Exception as exc:
