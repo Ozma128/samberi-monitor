@@ -3,12 +3,22 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Environments
+# Environments and local secrets
 venv/
 env/
+.venv/
 .env
+.streamlit/secrets.toml
 
 # Temporary / Zip files
 *.zip
 *.log
 .system_generated/
+.pytest-tmp*/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Generated reports
+data/samples/test_monitoring_output.xlsx

@@ -1,156 +1,231 @@
-"""
-Модуль расчета ценовых метрик, разницы цен, Price Index (PI) и аналитических сводок.
-"""
+"""Расчёт сопоставимых цен, Price Index и устойчивых сводных KPI."""
 
-from typing import List, Dict, Any, Optional
-import pandas as pd
-import numpy as np
+from __future__ import annotations
+
+import math
+import re
+from typing import Any
+
+from .matcher import extract_attributes
+
+PARITY_LOWER = 98.0
+PARITY_UPPER = 102.0
+MAX_PRICE = 10_000_000.0
+STATUS_SAMBERI_CHEAPER = "✅ Самбери дешевле"
+STATUS_COMPETITOR_CHEAPER = "❌ Конкурент дешевле"
+STATUS_PARITY = "⚖️ Паритет цен (±2%)"
+STATUS_UNKNOWN = "Не определен"
+DUMPING_ALERT = "⚠️ ДЕМПИНГ (Конкурент ниже закупки Самбери)"
+
+MULTIBUY_PATTERN = re.compile(
+    r"(?:\bот\s*\d+|\d+\s*[+хx×]\s*\d+|при\s+покупке|за\s*\d+\s*шт|\d+\s*по\s*цене)",
+    re.IGNORECASE,
+)
 
 
-def calculate_price_metrics(item: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Рассчитывает все аналитические поля для одной строки мониторинга:
-    - Разница цен (руб.)
-    - Price Index (%)
-    - Оценка демпинга (цена конкурента ниже себестоимости закупки)
-    - Статус ценового паритета
-    """
-    our_purchase = item.get("our_purchase_price")
-    our_sale = item.get("our_sale_price")
-    our_promo = item.get("our_promo_price")
-    
-    comp_regular = item.get("regular_price")
-    comp_promo = item.get("promo_price")
-    
-    # Приводим к float если возможно
-    def to_float(val):
-        try:
-            return float(val) if val is not None and not pd.isna(val) else None
-        except (ValueError, TypeError):
-            return None
+def _positive_finite(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0 or number > MAX_PRICE:
+        return None
+    return number
 
-    our_purchase = to_float(our_purchase)
-    our_sale = to_float(our_sale)
-    our_promo = to_float(our_promo)
-    comp_regular = to_float(comp_regular)
-    comp_promo = to_float(comp_promo)
 
-    # 1. Разница регулярных цен (в рублях: Конкурент - Самбери)
-    # Положительная разница: у конкурента дороже (Самбери дешевле)
-    # Отрицательная разница: у конкурента дешевле (Самбери дороже)
-    regular_diff_rub = None
-    if comp_regular is not None and our_sale is not None:
-        regular_diff_rub = round(comp_regular - our_sale, 2)
+def _is_valid_sku(value: Any) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip().casefold()
+    return text not in {"", "-", "nan", "none", "null", "<na>"}
 
-    # 2. Разница промо-цен (в рублях)
-    promo_diff_rub = None
-    if comp_promo is not None and our_promo is not None:
-        promo_diff_rub = round(comp_promo - our_promo, 2)
 
-    # 3. Эффективные цены (с учетом действующих промо-акций)
-    comp_eff = comp_promo if (comp_promo is not None and comp_promo > 0) else comp_regular
-    our_eff = our_promo if (our_promo is not None and our_promo > 0) else our_sale
+def _competitor_pack_factor(item: dict[str, Any]) -> tuple[float | None, str | None]:
+    """Привести цену за кг/100г/л к физической фасовке сопоставленного SKU."""
 
-    effective_diff_rub = None
-    if comp_eff is not None and our_eff is not None:
-        effective_diff_rub = round(comp_eff - our_eff, 2)
+    unit = str(item.get("unit") or "шт").strip().casefold().replace(" ", "")
+    aliases = {"упаковка": "упак", "уп": "упак", "100гр": "100г"}
+    unit = aliases.get(unit, unit)
+    if unit in {"шт", "упак"}:
+        return 1.0, None
 
-    # 4. Регулярный Price Index (PI % = Цена Конкурента / Цена Самбери * 100)
-    pi_regular = None
-    if comp_regular is not None and our_sale is not None and our_sale > 0:
-        pi_regular = round((comp_regular / our_sale) * 100.0, 1)
+    physical_text = " ".join(
+        str(value or "") for value in (item.get("matched_name"), item.get("weight_volume"))
+    )
+    attrs = extract_attributes(physical_text)
+    if unit == "100г":
+        weight = attrs.get("weight_g")
+        return (
+            (weight / 100.0, None) if weight else (None, "Не найдена масса SKU для цены за 100 г")
+        )
+    if unit == "кг":
+        weight = attrs.get("weight_g")
+        return (weight / 1000.0, None) if weight else (None, "Не найдена масса SKU для цены за кг")
+    if unit == "л":
+        volume = attrs.get("volume_ml")
+        return (volume / 1000.0, None) if volume else (None, "Не найден объём SKU для цены за литр")
+    return None, f"Неподдерживаемая единица цены: {unit}"
 
-    # 5. Эффективный Price Index (с учетом промо)
-    pi_effective = None
-    if comp_eff is not None and our_eff is not None and our_eff > 0:
-        pi_effective = round((comp_eff / our_eff) * 100.0, 1)
 
-    # 6. Определение статуса и алертов
-    status = "Не определен"
-    alert = None
+def _effective_price(
+    regular: float | None,
+    promo: float | None,
+    *,
+    conditional: bool = False,
+) -> tuple[float | None, bool, str | None]:
+    if regular is None:
+        if promo is None or conditional:
+            return None, False, None
+        return promo, True, None
+    if promo is None or conditional:
+        return regular, False, None
+    if promo > regular:
+        return regular, False, "Промо-цена выше регулярной и не применена"
+    return promo, True, None
 
-    # Проверка на продажу ниже закупки Самбери (Демпинг конкурента)
-    if comp_eff is not None and our_purchase is not None and our_purchase > 0:
-        if comp_eff < our_purchase:
-            alert = "⚠️ ДЕМПИНГ (Конкурент ниже закупки Самбери)"
 
-    if pi_effective is not None:
-        if pi_effective > 102.0:
-            status = "✅ Самбери дешевле"
-        elif pi_effective < 98.0:
-            status = "❌ Конкурент дешевле"
+def calculate_price_metrics(item: dict[str, Any]) -> dict[str, Any]:
+    """Рассчитать показатели только по валидным положительным сопоставимым ценам."""
+
+    warnings: list[str] = list(item.get("data_quality_warnings") or [])
+    our_purchase = _positive_finite(item.get("our_purchase_price"))
+    our_sale = _positive_finite(item.get("our_sale_price"))
+    our_promo = _positive_finite(item.get("our_promo_price"))
+    comp_regular_raw = _positive_finite(
+        item.get("regular_price", item.get("comp_regular_unit_price"))
+    )
+    comp_promo_raw = _positive_finite(item.get("promo_price", item.get("comp_promo_unit_price")))
+
+    factor, factor_warning = _competitor_pack_factor(item)
+    if factor_warning and _is_valid_sku(item.get("matched_sku")):
+        warnings.append(factor_warning)
+    comp_regular = round(comp_regular_raw * factor, 2) if comp_regular_raw and factor else None
+    comp_promo = round(comp_promo_raw * factor, 2) if comp_promo_raw and factor else None
+
+    promo_condition = str(item.get("promo_condition") or "")
+    conditional_promo = bool(MULTIBUY_PATTERN.search(promo_condition))
+    if conditional_promo and comp_promo is not None:
+        warnings.append("Условное мультипромо не включено в эффективную цену")
+
+    our_eff, our_promo_applied, our_warning = _effective_price(our_sale, our_promo)
+    comp_eff, comp_promo_applied, comp_warning = _effective_price(
+        comp_regular,
+        comp_promo,
+        conditional=conditional_promo,
+    )
+    if our_warning:
+        warnings.append(f"Самбери: {our_warning}")
+    if comp_warning:
+        warnings.append(f"Конкурент: {comp_warning}")
+
+    regular_diff = (
+        round(comp_regular - our_sale, 2)
+        if comp_regular is not None and our_sale is not None
+        else None
+    )
+    promo_diff = (
+        round(comp_promo - our_promo, 2)
+        if comp_promo is not None and our_promo is not None
+        else None
+    )
+    effective_diff = (
+        round(comp_eff - our_eff, 2) if comp_eff is not None and our_eff is not None else None
+    )
+
+    pi_regular_raw = (
+        comp_regular / our_sale * 100.0
+        if comp_regular is not None and our_sale is not None
+        else None
+    )
+    pi_effective_raw = (
+        comp_eff / our_eff * 100.0 if comp_eff is not None and our_eff is not None else None
+    )
+
+    status = STATUS_UNKNOWN
+    if pi_effective_raw is not None:
+        if pi_effective_raw > PARITY_UPPER:
+            status = STATUS_SAMBERI_CHEAPER
+        elif pi_effective_raw < PARITY_LOWER:
+            status = STATUS_COMPETITOR_CHEAPER
         else:
-            status = "⚖️ Паритет цен (±2%)"
+            status = STATUS_PARITY
+
+    is_dumping = bool(comp_eff is not None and our_purchase is not None and comp_eff < our_purchase)
+    alert = DUMPING_ALERT if is_dumping else None
 
     return {
         **item,
         "our_purchase_price": our_purchase,
         "our_sale_price": our_sale,
         "our_promo_price": our_promo,
+        "comp_regular_unit_price": comp_regular_raw,
+        "comp_promo_unit_price": comp_promo_raw,
+        "comp_pack_factor": round(factor, 6) if factor is not None else None,
         "comp_regular_price": comp_regular,
         "comp_promo_price": comp_promo,
         "comp_effective_price": comp_eff,
         "our_effective_price": our_eff,
-        "regular_diff_rub": regular_diff_rub,
-        "promo_diff_rub": promo_diff_rub,
-        "effective_diff_rub": effective_diff_rub,
-        "price_index_regular": pi_regular,
-        "price_index_effective": pi_effective,
+        "our_promo_applied": our_promo_applied,
+        "comp_promo_applied": comp_promo_applied,
+        "conditional_promo": conditional_promo,
+        "regular_diff_rub": regular_diff,
+        "promo_diff_rub": promo_diff,
+        "effective_diff_rub": effective_diff,
+        "price_index_regular": round(pi_regular_raw, 1) if pi_regular_raw is not None else None,
+        "price_index_effective": round(pi_effective_raw, 1)
+        if pi_effective_raw is not None
+        else None,
+        "price_index_effective_raw": pi_effective_raw,
         "status": status,
-        "alert": alert
+        "alert": alert,
+        "is_dumping": is_dumping,
+        "data_quality_warnings": list(dict.fromkeys(warnings)),
     }
 
 
-def summarize_price_index(items: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Формирует общую сводку и KPI по всей выборке промоделированных ценников.
-    """
-    if not items:
-        return {
-            "total_items": 0,
-            "matched_items": 0,
-            "match_rate": 0.0,
-            "avg_price_index": 100.0,
-            "samberi_cheaper_count": 0,
-            "competitor_cheaper_count": 0,
-            "parity_count": 0,
-            "dumping_alerts_count": 0,
-            "total_our_basket": 0.0,
-            "total_comp_basket": 0.0,
-            "basket_price_index": 100.0
-        }
+def summarize_price_index(items: list[dict[str, Any]]) -> dict[str, Any]:
+    """Сформировать сводку без ложного PI=100 при отсутствии сравнений."""
 
-    df = pd.DataFrame(items)
-    
-    total = len(df)
-    matched = df["matched_sku"].notna().sum() if "matched_sku" in df.columns else 0
-    match_rate = round((matched / total * 100.0), 1) if total > 0 else 0.0
+    total = len(items)
+    matched_items = sum(_is_valid_sku(item.get("matched_sku")) for item in items)
+    successful_recognitions = sum(item.get("extraction_status", "ok") == "ok" for item in items)
+    comparable: list[tuple[dict[str, Any], float, float, float]] = []
+    for item in items:
+        our_price = _positive_finite(item.get("our_effective_price"))
+        competitor_price = _positive_finite(item.get("comp_effective_price"))
+        if our_price is None or competitor_price is None:
+            continue
+        # Recompute the raw index from trusted price inputs. Imported/exported
+        # summaries may contain stale, rounded, NaN or otherwise inconsistent PI.
+        comparable.append((item, our_price, competitor_price, competitor_price / our_price * 100.0))
 
-    valid_pi = df[df["price_index_effective"].notna()]
-    avg_pi = round(valid_pi["price_index_effective"].mean(), 1) if not valid_pi.empty else 100.0
-
-    samberi_cheaper = (df["status"] == "✅ Самбери дешевле").sum() if "status" in df.columns else 0
-    comp_cheaper = (df["status"] == "❌ Конкурент дешевле").sum() if "status" in df.columns else 0
-    parity = (df["status"] == "⚖️ Паритет цен (±2%)").sum() if "status" in df.columns else 0
-    dumping = df["alert"].notna().sum() if "alert" in df.columns else 0
-
-    # Корзинный индекс цен (Сумма цен конкурента / Сумма цен Самбери)
-    basket_df = df[df["our_effective_price"].notna() & df["comp_effective_price"].notna()]
-    our_basket = basket_df["our_effective_price"].sum() if not basket_df.empty else 0.0
-    comp_basket = basket_df["comp_effective_price"].sum() if not basket_df.empty else 0.0
-    
-    basket_pi = round((comp_basket / our_basket * 100.0), 1) if our_basket > 0 else 100.0
+    indices = [entry[3] for entry in comparable]
+    avg_pi = round(sum(indices) / len(indices), 1) if indices else None
+    our_basket = sum(entry[1] for entry in comparable)
+    comp_basket = sum(entry[2] for entry in comparable)
+    basket_pi = (
+        round(comp_basket / our_basket * 100.0, 1) if comparable and our_basket > 0 else None
+    )
 
     return {
-        "total_items": int(total),
-        "matched_items": int(matched),
-        "match_rate": float(match_rate),
-        "avg_price_index": float(avg_pi),
-        "samberi_cheaper_count": int(samberi_cheaper),
-        "competitor_cheaper_count": int(comp_cheaper),
-        "parity_count": int(parity),
-        "dumping_alerts_count": int(dumping),
-        "total_our_basket": round(float(our_basket), 2),
-        "total_comp_basket": round(float(comp_basket), 2),
-        "basket_price_index": float(basket_pi)
+        "total_items": total,
+        "successful_recognitions": successful_recognitions,
+        "failed_recognitions": total - successful_recognitions,
+        "matched_items": matched_items,
+        "match_rate": round(matched_items / total * 100.0, 1) if total else 0.0,
+        "comparable_items": len(comparable),
+        "avg_price_index": avg_pi,
+        "samberi_cheaper_count": sum(
+            item.get("status") == STATUS_SAMBERI_CHEAPER for item in items
+        ),
+        "competitor_cheaper_count": sum(
+            item.get("status") == STATUS_COMPETITOR_CHEAPER for item in items
+        ),
+        "parity_count": sum(item.get("status") == STATUS_PARITY for item in items),
+        "dumping_alerts_count": sum(item.get("is_dumping") is True for item in items),
+        "total_our_basket": round(our_basket, 2),
+        "total_comp_basket": round(comp_basket, 2),
+        "basket_price_index": basket_pi,
     }

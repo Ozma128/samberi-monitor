@@ -1,15 +1,33 @@
-version: '3.8'
-
 services:
   samberi-monitor:
+    image: samberi-monitor:local
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    container_name: samberi_price_monitor
-    restart: always
+    user: "10001:10001"
+    restart: unless-stopped
+    init: true
     ports:
-      - "8501:8501"
-    env_file:
-      - ../.env
-    volumes:
-      - ../data:/app/data
+      - "127.0.0.1:8501:8501"
+    environment:
+      GEMINI_API_KEY: "${GEMINI_API_KEY:?GEMINI_API_KEY must be provided by a protected environment file}"
+      APP_PASSWORD: "${APP_PASSWORD:?APP_PASSWORD must be provided by a protected environment file}"
+      GEMINI_MODEL: "${GEMINI_MODEL:-gemini-3.6-flash}"
+      APP_AUTH_DISABLED: "false"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m,uid=10001,gid=10001,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    mem_limit: 2g
+    mem_reservation: 512m
+    cpus: 2.0
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

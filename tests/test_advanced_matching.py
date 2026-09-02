@@ -1,55 +1,180 @@
-"""
-Тест продвинутого сопоставления номенклатуры при перестановке слов и ритейл-сокращениях.
-"""
-import os
-import sys
-
-# UTF-8 вывод
-if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from __future__ import annotations
 
 import pandas as pd
-from core.matcher import CatalogMatcher
+import pytest
 
-catalog = pd.DataFrame([
-    {'код_товара': '104921', 'наименование_товара': 'Молоко ультрапастеризованное Домик в деревне 3.2% 0.93л ПЭТ', 'цена_закупки': 72.0, 'цена_продажи': 94.9, 'цена_на_промо': 84.9},
-    {'код_товара': '104922', 'наименование_товара': 'Молоко ультрапастеризованное Домик в деревне 2.5% 0.93л ПЭТ', 'цена_закупки': 68.0, 'цена_продажи': 89.9, 'цена_на_промо': None},
-    {'код_товара': '201844', 'наименование_товара': 'Кофе растворимый Nescafe Gold сублимированный со стеклом 190г', 'цена_закупки': 480.0, 'цена_продажи': 649.0, 'цена_на_промо': 489.0},
-    {'код_товара': '201845', 'наименование_товара': 'Кофе растворимый Nescafe Gold сублимированный пакет 95г', 'цена_закупки': 240.0, 'цена_продажи': 329.0, 'цена_на_промо': None},
-    {'код_товара': '305112', 'наименование_товара': 'Сыр Российский Брест-Литовск 45% 200г брус фас.', 'цена_закупки': 175.0, 'цена_продажи': 239.0, 'цена_на_промо': None},
-    {'код_товара': '409201', 'наименование_товара': 'Масло сливочное Простоквашино 82.5% 180г фольга', 'цена_закупки': 145.0, 'цена_продажи': 189.0, 'цена_на_промо': 159.0}
-])
+from core.matcher import (
+    MAX_CANDIDATE_POOL,
+    CatalogMatcher,
+    CatalogSchemaError,
+    extract_attributes,
+    normalize_product_text,
+)
 
-matcher = CatalogMatcher(catalog)
 
-test_cases = [
-    ("Домик в дер. 3.2% молоко 930мл пл/бут", "104921", "Перестановка + сокращения + жирность 3.2%"),
-    ("Молоко 2.5% Домик в деревне 0.93л", "104922", "Перестановка + жирность 2.5%"),
-    ("Нескафе Голд кофе 190г сублим", "201844", "Транслитерация бренда (Нескафе) + вес 190г"),
-    ("Кофе 95г Nescafe Gold", "201845", "Перестановка + вес 95г"),
-    ("Сыр 45% 200г брусок Брест Литовск российский", "305112", "Полный хаос в порядке слов + 45%"),
-    ("82.5% масло сливочн. 180г Простоквашино пачка", "409201", "Жирность в начале + перестановка")
-]
+@pytest.mark.parametrize(
+    ("query", "expected_sku"),
+    [
+        ("Домик в дер. 3,2% мол. 0,93л пл/бут", "104921"),
+        ("Молоко 2.5% Домик в деревне 930 мл", "104922"),
+        ("Нескафе Голд кофе 190г раств.", "201844"),
+        ("Кофе 95г Nescafe Gold", "201845"),
+        ("Сыр 45% 200г брусок Брест Литовск российский", "305112"),
+        ("82.5% масло сливочн. 180г Простоквашино", "409201"),
+    ],
+)
+def test_complex_matching(catalog_df: pd.DataFrame, query: str, expected_sku: str) -> None:
+    assert CatalogMatcher(catalog_df).match_item(query)["matched_sku"] == expected_sku
 
-print("=== ТЕСТИРОВАНИЕ АЛГОРИТМА НА СЛОЖНЫХ ПЕРЕСТАНОВКАХ И АТРИБУТАХ ===")
-all_ok = True
-for query, expected_sku, desc in test_cases:
-    res = matcher.match_item(query)
-    sku = res['matched_sku']
-    score = res['match_score']
-    name = res['matched_name']
-    is_correct = (sku == expected_sku)
-    if not is_correct:
-        all_ok = False
-    status = "✅ ТОЧНО" if is_correct else "❌ ОШИБКА"
-    print(f"{status} [{desc}]")
-    print(f"   Запрос:  '{query}'")
-    print(f"   Результат: SKU {sku} -> '{name}' (Скор совпадения: {score}%)\n")
 
-if all_ok:
-    print("🏆 ВСЕ 6 ТЕСТОВ НА ПЕРЕСТАНОВКУ СЛОВ И АТРИБУТЫ ПРОЙДЕНЫ НА 100%!")
-else:
-    print("❌ Есть расхождения в тестах.")
+def test_explicit_physical_conflicts_are_rejected() -> None:
+    catalog = pd.DataFrame(
+        [
+            {"sku": "180", "product_name": "Йогурт Тест 3.2% 180г", "sale_price": 100},
+            {"sku": "200", "product_name": "Йогурт Тест 3.2% 200г", "sale_price": 110},
+            {"sku": "vol", "product_name": "Йогурт Тест 3.2% 1л", "sale_price": 120},
+        ]
+    )
+    matcher = CatalogMatcher(catalog)
+    assert matcher.match_item("Йогурт Тест 3.2% 200г")["matched_sku"] == "200"
+    assert matcher.match_item("Йогурт Тест 2.5% 200г")["matched_sku"] is None
+    assert matcher.match_item("Йогурт Тест 3.2% 1кг")["matched_sku"] is None
+
+
+def test_explicit_brand_conflict_forbids_automatic_match() -> None:
+    catalog = pd.DataFrame(
+        [
+            {
+                "sku": "wrong-brand",
+                "product_name": "Молоко Простоквашино 3.2% 930мл",
+                "sale_price": 100,
+            }
+        ]
+    )
+
+    result = CatalogMatcher(catalog).match_item(
+        "Молоко Домик в деревне 3.2% 930мл",
+        brand="Домик в деревне",
+    )
+
+    assert result["matched_sku"] is None
+
+
+def test_explicit_brand_alias_still_matches_catalog_name() -> None:
+    catalog = pd.DataFrame(
+        [{"sku": "coffee", "product_name": "Кофе Nescafe Gold 190г", "sale_price": 500}]
+    )
+
+    result = CatalogMatcher(catalog).match_item(
+        "Кофе Голд 190г",
+        brand="Нескафе",
+    )
+
+    assert result["matched_sku"] == "coffee"
+
+
+def test_no_token_overlap_uses_deterministic_bounded_ngram_shortlist() -> None:
+    filler_count = MAX_CANDIDATE_POOL + 20
+    catalog = pd.DataFrame(
+        [
+            {
+                "sku": f"filler-{index}",
+                "product_name": f"Заполнитель каталога номер {index}",
+                "sale_price": 100,
+            }
+            for index in range(filler_count)
+        ]
+        + [{"sku": "target", "product_name": "Нескафе", "sale_price": 500}]
+    )
+    matcher = CatalogMatcher(catalog)
+    query_norm = normalize_product_text("Нескафэ")
+
+    first = matcher._candidate_indices(query_norm)
+    second = matcher._candidate_indices(query_norm)
+
+    assert 1 <= len(first) <= MAX_CANDIDATE_POOL
+    assert first == second
+    assert filler_count in first
+    assert matcher.match_item("Нескафэ", threshold=70)["matched_sku"] == "target"
+
+
+def test_separate_weight_volume_participates_in_matching() -> None:
+    catalog = pd.DataFrame(
+        [
+            {"sku": "180", "product_name": "Творог Бренд 180г", "sale_price": 100},
+            {"sku": "200", "product_name": "Творог Бренд 200г", "sale_price": 105},
+        ]
+    )
+    result = CatalogMatcher(catalog).match_item(
+        "Творог Бренд",
+        weight_volume="200 г",
+    )
+    assert result["matched_sku"] == "200"
+
+
+def test_ambiguous_match_requires_manual_confirmation() -> None:
+    catalog = pd.DataFrame(
+        [
+            {"sku": "a", "product_name": "Сахар Белый 1кг", "sale_price": 100},
+            {"sku": "b", "product_name": "Сахар Белый 1кг", "sale_price": 101},
+        ]
+    )
+    result = CatalogMatcher(catalog).match_item("Сахар Белый 1кг")
+    assert result["matched_sku"] is None
+    assert "Неоднозначное" in result["match_reason"]
+    assert len(result["candidates"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Молоко 3,2% 0,93л", {"fat": 3.2, "volume_ml": 930}),
+        ("Крупа 5х80г (400г)", {"weight_g": 400, "count": 5}),
+        ("Вода 6 x 1 л", {"volume_ml": 6000, "count": 6}),
+        ("Мука 1 000 г", {"weight_g": 1000}),
+        ("Сок яблочный 100% 1л", {"fat": None, "volume_ml": 1000}),
+    ],
+)
+def test_attribute_parser(text: str, expected: dict[str, object]) -> None:
+    attributes = extract_attributes(text)
+    for key, value in expected.items():
+        assert attributes[key] == value
+
+
+def test_normalization_preserves_decimal_comma_and_slash_abbreviations() -> None:
+    normalized = normalize_product_text("Мол. у/паст. 3,2% 0,93л пл/бут")
+    assert "3.2%" in normalized
+    assert "930мл" in normalized
+    assert "ультрапастеризованное" in normalized
+    assert "пэт бутылка" in normalized
+
+
+def test_oversized_numeric_attribute_tokens_are_ignored_safely() -> None:
+    oversized_name = f"Товар {'9' * 400}кг"
+
+    assert extract_attributes(oversized_name) == {
+        "fat": None,
+        "volume_ml": None,
+        "weight_g": None,
+        "count": None,
+    }
+    matcher = CatalogMatcher(
+        pd.DataFrame([{"sku": "oversized", "product_name": oversized_name, "sale_price": 10}])
+    )
+    assert matcher.catalog_records[0]["код_товара"] == "oversized"
+
+
+def test_catalog_schema_english_aliases_and_sku_normalization() -> None:
+    frame = pd.DataFrame(
+        [{"product_id": 123.0, "product_name": "Товар", "purchase_price": 10, "sale_price": 20}]
+    )
+    matcher = CatalogMatcher(frame)
+    assert matcher.catalog_records[0]["код_товара"] == "123"
+    assert matcher.catalog_records[0]["цена_закупки"] == 10
+
+
+def test_catalog_rejects_ambiguous_or_missing_columns() -> None:
+    with pytest.raises(CatalogSchemaError, match="Неоднозначные"):
+        CatalogMatcher(pd.DataFrame([{"sku": "1", "name": "Товар", "price": 10, "sale_price": 11}]))
+    with pytest.raises(CatalogSchemaError, match="обязательные"):
+        CatalogMatcher(pd.DataFrame([{"sku": "1", "sale_price": 10}]))

@@ -1,113 +1,269 @@
-# Инструкция: Как развернуть систему мониторинга ценников 24/7
+# Безопасное развёртывание «Самбери: Мониторинг ценников»
 
-Данное руководство объясняет, как запустить веб-приложение на удаленном сервере (VPS), чтобы сервис работал автономно круглые сутки, даже когда ваш рабочий компьютер выключен.
+В production используйте один из двух вариантов:
 
----
+1. Docker Compose на VPS за HTTPS reverse proxy с обязательной аутентификацией.
+2. Приватное приложение в Streamlit Cloud с секретами в настройках платформы.
 
-## Вариант 1. Российский VPS (TimeWeb Cloud / Beget / Selectel)
+Не публикуйте Streamlit-порт напрямую в интернет и не храните API-ключи, SSH-ключи, пароли или файлы `.env` в репозитории, Docker-образе и ZIP-архивах.
 
-Стоимость: **~150–250 рублей в месяц**.
+## До первого запуска
 
-### Шаг 1. Аренда сервера
-1. Зарегистрируйтесь на сайте [TimeWeb Cloud](https://timeweb.cloud/) или [Beget](https://beget.com/).
-2. Создайте облачный сервер:
-   - ОС: **Ubuntu 22.04 LTS** (или 24.04).
-   - Конфигурация: минимальная (1 CPU, 1–2 GB RAM, 20 GB SSD).
+- Отзовите и перевыпустите все ключи, которые когда-либо попадали в Git или архивы проекта.
+- Удалите секреты из всей Git-истории и старых release-артефактов. Удаления файла только из последнего коммита недостаточно.
+- Настройте вход на VPS по SSH-ключу, запретите парольный вход и прямой вход системного администратора.
+- Используйте отдельный домен, например `monitor.example.ru`.
+- Убедитесь, что отправка фотографий во внешний Vision API разрешена политикой обработки данных компании.
 
-### Шаг 2. Подключение и установка
-Подключитесь к серверу через терминал (PowerShell / PuTTY / SSH):
-```bash
-ssh root@IP_ВАШЕГО_СЕРВЕРА
-```
+## Вариант A: Docker Compose на VPS
 
-Установите Python, Git и клонируйте проект:
-```bash
-# Обновление пакетов
-apt update && apt upgrade -y
-apt install -y python3-pip python3-venv git
+### 1. Подготовка сервера
 
-# Клонирование репозитория
-git clone <URL_РЕПОЗИТОРИЯ> /opt/samberi_monitor
-cd /opt/samberi_monitor
-
-# Создание виртуального окружения
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-### Шаг 3. Настройка ключей (.env)
-Создайте файл `.env`:
-```bash
-nano .env
-```
-Вставьте ваш ключ:
-```env
-GEMINI_API_KEY=AIzaSy...
-```
-Сохраните (`Ctrl+O`, затем `Enter`, выход `Ctrl+X`).
-
-### Шаг 4. Настройка автозапуска через Systemd (24/7)
-Создайте системную службу, чтобы приложение автоматически перезапускалось при любых сбоях или перезагрузке сервера:
+Установите поддерживаемые Docker Engine и Docker Compose Plugin по официальной инструкции для вашей ОС. Создайте отдельного системного пользователя и каталог приложения:
 
 ```bash
-cat << 'EOF' > /etc/systemd/system/samberi-monitor.service
+sudo useradd --system --create-home --shell /usr/sbin/nologin samberi
+sudo install -d -o samberi -g samberi -m 0750 /opt/samberi-monitor
+sudo -u samberi git clone <URL_ПРИВАТНОГО_РЕПОЗИТОРИЯ> /opt/samberi-monitor
+```
+
+Приложение внутри контейнера запускается непривилегированным пользователем UID 10001. Доступ к Docker socket ему не нужен.
+
+### 2. Секреты вне репозитория
+
+Создайте защищённый environment-файл на хосте:
+
+```bash
+sudo install -o root -g root -m 0600 /dev/null /etc/samberi-monitor.env
+sudoedit /etc/samberi-monitor.env
+```
+
+Содержимое:
+
+```dotenv
+GEMINI_API_KEY=вставьте_новый_ключ
+APP_PASSWORD=вставьте_длинный_случайный_пароль
+```
+
+Не передавайте ключ или пароль в аргументах командной строки: аргументы могут попасть в историю shell и список процессов. Файл `/etc/samberi-monitor.env` не должен находиться внутри checkout проекта.
+
+### 3. Управление контейнером через systemd
+
+Создайте `/etc/systemd/system/samberi-monitor.service`:
+
+```ini
 [Unit]
-Description=Samberi Price Tag Monitoring Service
-After=network.target
+Description=Samberi price monitoring container
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
 
 [Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/samberi_monitor
-ExecStart=/opt/samberi_monitor/venv/bin/streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true
-Restart=always
-RestartSec=5
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/samberi-monitor/deploy
+EnvironmentFile=/etc/samberi-monitor.env
+ExecStartPre=/usr/bin/docker compose config --quiet
+ExecStartPre=/usr/bin/docker compose build --pull
+ExecStart=/usr/bin/docker compose up --detach --remove-orphans
+ExecStop=/usr/bin/docker compose down
+TimeoutStartSec=0
 
 [Install]
 WantedBy=multi-user.target
-EOF
 ```
 
-Запустите службу:
+Запустите сервис:
+
 ```bash
-systemctl daemon-reload
-systemctl enable samberi-monitor
-systemctl start samberi-monitor
+sudo systemctl daemon-reload
+sudo systemctl enable --now samberi-monitor.service
+sudo systemctl status samberi-monitor.service
+curl --fail http://127.0.0.1:8501/_stcore/health
 ```
 
-Проверить статус:
+Compose публикует порт только на `127.0.0.1`. Он доступен reverse proxy на том же сервере, но недоступен извне напрямую. Контейнер также использует read-only filesystem, временный `/tmp`, сброшенные Linux capabilities, `no-new-privileges` и ограничения ресурсов.
+
+### 4. HTTPS и аутентификация через Nginx
+
+Для внутреннего корпоративного сервиса предпочтительны VPN или identity-aware proxy с SSO/MFA. Ниже приведён минимальный вариант с HTTPS и Basic Auth.
+
+Установите Nginx, Certbot и утилиту для создания хеша пароля:
+
 ```bash
-systemctl status samberi-monitor
+sudo apt-get update
+sudo apt-get install --yes nginx apache2-utils certbot python3-certbot-nginx
+sudo htpasswd -c /etc/nginx/samberi.htpasswd operator
+sudo chmod 0640 /etc/nginx/samberi.htpasswd
+sudo chown root:www-data /etc/nginx/samberi.htpasswd
 ```
 
-### Шаг 5. Открытие в браузере
-Откройте в браузере на телефоне или компьютере:
-`http://IP_ВАШЕГО_СЕРВЕРА:8501`
+Команда `htpasswd` запросит пароль интерактивно; не помещайте его в команду или конфигурацию открытым текстом.
 
----
+Создайте `/etc/nginx/conf.d/streamlit-websocket.conf`:
 
-## Вариант 2. Запуск через Docker Compose (в 1 команду)
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+```
 
-Если на сервере установлен Docker:
+Сначала создайте webroot и временную конфигурацию, которая обслуживает только
+ACME challenge. На этом этапе приложение и формы входа по HTTP не публикуются:
+
 ```bash
-cd /opt/samberi_monitor/deploy
-docker compose up -d --build
+sudo install -d -o www-data -g www-data -m 0755 /var/www/certbot/.well-known/acme-challenge
 ```
 
----
+Создайте `/etc/nginx/sites-available/samberi-monitor`:
 
-## Вариант 3. Запуск Telegram-бота для сбора фото из магазина
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    server_name monitor.example.ru;
 
-Чтобы сотрудники могли прямо из торгового зала скидывать пачки фото ценников в Telegram-чат:
-1. Создайте бота в Telegram через [@BotFather](https://t.me/BotFather) и скопируйте токен.
-2. В файле `.env` укажите:
-   ```env
-   TELEGRAM_BOT_TOKEN=123456789:ABCdef...
-   GEMINI_API_KEY=AIzaSy...
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type text/plain;
+    }
+
+    location / {
+        return 404;
+    }
+}
+```
+
+Включите конфигурацию и выпустите сертификат через webroot:
+
+```bash
+sudo ln -s /etc/nginx/sites-available/samberi-monitor /etc/nginx/sites-enabled/samberi-monitor
+sudo nginx -t
+sudo systemctl reload nginx
+sudo certbot certonly --webroot --webroot-path /var/www/certbot -d monitor.example.ru
+```
+
+Только после успешного выпуска сертификата замените site-конфигурацию на
+финальную. HTTP теперь только обслуживает продление ACME и перенаправляет на
+HTTPS; пароль никогда не передаётся по открытому соединению:
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    server_name monitor.example.ru;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type text/plain;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name monitor.example.ru;
+
+    ssl_certificate /etc/letsencrypt/live/monitor.example.ru/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/monitor.example.ru/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    client_max_body_size 100m;
+    auth_basic "Restricted";
+    auth_basic_user_file /etc/nginx/samberi.htpasswd;
+
+    location / {
+        proxy_pass http://127.0.0.1:8501;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 600s;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+}
+```
+
+Проверьте и примените финальную конфигурацию, затем проверьте автообновление:
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+sudo certbot renew --dry-run
+```
+
+Открывайте во внешнем firewall/security group только SSH и TCP 80/443. Порт 8501 не открывайте. Перед включением UFW убедитесь, что текущий доступ по SSH-ключу работает:
+
+```bash
+sudo ufw allow OpenSSH
+sudo ufw allow 'Nginx Full'
+sudo ufw deny 8501/tcp
+sudo ufw enable
+```
+
+После выпуска TLS проверьте доступ без передачи пароля в командной строке:
+
+```bash
+curl --fail --user operator https://monitor.example.ru/_stcore/health
+```
+
+`curl` запросит пароль интерактивно.
+
+### 5. Обновление и откат
+
+Обновляйте только до проверенного коммита или тега:
+
+```bash
+cd /opt/samberi-monitor
+sudo -u samberi git pull --ff-only
+sudo systemctl restart samberi-monitor.service
+curl --fail http://127.0.0.1:8501/_stcore/health
+```
+
+Перед обновлением зафиксируйте текущий commit SHA. Для отката переключите checkout на ранее проверенный тег/commit и перезапустите сервис. Не разворачивайте сохранённые ZIP-копии: они быстро устаревают и могут содержать секреты.
+
+Логи ограничены ротацией Docker Compose. Просмотр без вывода секретов:
+
+```bash
+sudo docker compose \
+  --env-file /etc/samberi-monitor.env \
+  --file /opt/samberi-monitor/deploy/docker-compose.yml \
+  logs --tail=200 samberi-monitor
+```
+
+## Вариант B: Streamlit Cloud
+
+1. Используйте очищенный приватный репозиторий без секретов и старых архивов.
+2. Укажите entrypoint `app.py` и файл зависимостей `requirements.txt`.
+3. В настройках Secrets приложения добавьте:
+
+   ```toml
+   GEMINI_API_KEY = "новый_ключ"
+   APP_PASSWORD = "длинный_случайный_пароль"
    ```
-3. Запустите фоновую службу бота:
-   ```bash
-   python deploy/telegram_bot.py
-   ```
-4. Отправляйте боту фотографии. Напишите `/finish` — бот пришлет готовый Excel с расчетом Price Index!
+
+4. Включите приватный доступ рабочей области/SSO. Если тариф или платформа не позволяют ограничить доступ, не публикуйте приложение с общим оплачиваемым API-ключом.
+5. TLS для домена должен завершаться на инфраструктуре платформы или на одобренном компанией access proxy.
+
+Не добавляйте `.streamlit/secrets.toml` в Git. После изменения доступа или подозрения на утечку немедленно ротируйте API-ключ.
+
+## Эксплуатационный чек-лист
+
+- `docker compose config --quiet` проходит с защищённым environment-файлом.
+- Контейнер имеет статус `healthy` и работает не от UID 0.
+- Снаружи доступны только 80/443; `8501` привязан к loopback.
+- HTTPS перенаправление работает, а страница требует аутентификацию.
+- Секретов нет в Git, Docker history, образе, логах и артефактах сборки.
+- Настроены квоты API и оповещения о расходах у Vision-провайдера.
+- Установлены лимиты загрузок и подтверждена политика хранения фотографий.
+- Регулярно проверяются обновления базового образа и Python-зависимостей.

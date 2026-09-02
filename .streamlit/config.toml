@@ -1,0 +1,17 @@
+[server]
+headless = true
+enableXsrfProtection = true
+enableCORS = true
+maxUploadSize = 75
+maxMessageSize = 160
+fileWatcherType = "none"
+
+[client]
+toolbarMode = "minimal"
+
+[theme]
+base = "dark"
+primaryColor = "#E85D04"
+backgroundColor = "#0F172A"
+secondaryBackgroundColor = "#172033"
+textColor = "#F8FAFC"

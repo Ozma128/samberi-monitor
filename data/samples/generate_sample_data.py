@@ -4,6 +4,7 @@
 """
 
 import os
+
 import pandas as pd
 
 SAMPLE_CATALOG = [
@@ -102,8 +103,9 @@ SAMPLE_CATALOG = [
         "Цена закупки": 26.00,
         "Цена продажи": 44.90,
         "Цена на промо": None,
-    }
+    },
 ]
+
 
 def generate_samples(base_dir: str = "data/samples"):
     os.makedirs(base_dir, exist_ok=True)
@@ -112,6 +114,7 @@ def generate_samples(base_dir: str = "data/samples"):
     df.to_excel(excel_path, index=False)
     print(f"Каталог образцов успешно сохранен: {excel_path}")
     return excel_path
+
 
 if __name__ == "__main__":
     generate_samples()

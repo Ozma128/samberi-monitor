@@ -1,397 +1,644 @@
-"""
-Продвинутый модуль сопоставления (матчинга) распознанных ценников конкурентов 
-с номенклатурной матрицей сети "Самбери".
+"""Высокоточное сопоставление распознанных ценников с каталогом Самбери."""
 
-Особенности алгоритма:
-1. Полная устойчивость к перестановке слов (Token Sort / Token Set Ratio).
-2. Автоматическое раскрытие ритейл-сокращений (мол., масл., у/паст., пл/бут., в/с и т.д.).
-3. Транслитерация и синонимы брендов (Nescafe <-> Нескафе, Greenfield <-> Гринфилд и др.).
-4. Извлечение и валидация ключевых атрибутов:
-   - Жирность (3.2%, 2.5%, 82.5%, 45% и др.)
-   - Вес / Объем в стандартизированных единицах (0.93л -> 930мл, 1кг -> 1000г)
-   - Фасовка / Количество (100 пак., 200г, 190г)
-5. Штрафы за несовпадение критичных атрибутов (например, молоко 3.2% никогда не спутается с 2.5%).
-"""
+from __future__ import annotations
 
+import math
 import re
-from typing import List, Dict, Any, Optional, Tuple, Set
-import pandas as pd
-from rapidfuzz import fuzz, process
+import zlib
+from collections import Counter, defaultdict
+from typing import Any
 
-# Словарь типичных сокращений в ритейле РФ (Самбери, Реми, Пятерочка, Магнит и др.)
+import pandas as pd
+from rapidfuzz import fuzz
+
+DEFAULT_MATCH_THRESHOLD = 72.0
+DEFAULT_MIN_MARGIN = 3.0
+MAX_CANDIDATE_POOL = 500
+MAX_TOKEN_BUCKETS = 8_192
+MAX_TOKEN_POSTINGS = 2_048
+MAX_INDEX_TOKENS_PER_NAME = 24
+MAX_QUERY_TOKEN_BUCKETS = 24
+MAX_NGRAM_BUCKETS = 8_192
+MAX_NGRAM_POSTINGS = 2_048
+MAX_INDEX_NGRAMS_PER_NAME = 12
+MAX_QUERY_NGRAMS = 16
+MAX_NUMERIC_TOKEN_LENGTH = 32
+MAX_PHYSICAL_MEASURE = 10_000_000.0
+
+
+def _character_trigrams(value: str) -> set[str]:
+    compact = re.sub(r"\s+", " ", value.strip())
+    if len(compact) < 3:
+        return set()
+    return {compact[index : index + 3] for index in range(len(compact) - 2)}
+
+
+def _trigram_hash(value: str) -> int:
+    return zlib.crc32(value.encode("utf-8")) & 0xFFFFFFFF
+
+
+class CatalogSchemaError(ValueError):
+    """Справочник не содержит однозначной и корректной схемы."""
+
+
 ABBREVIATIONS_MAP = {
-    r"\bмол\b|\bмол\.\b|\bм-ко\b": "молоко",
-    r"\bмасл\b|\bмасл\.\b|\bм-ло\b": "масло",
-    r"\bслив\b|\bслив\.\b|\bсливочн\b": "сливочное",
-    r"\bраст\b|\bраст\.\b|\bрастит\b": "растительное",
-    r"\bподсолн\b|\bподс\.\b": "подсолнечное",
-    r"\bпаст\b|\bпаст\.\b|\bпастериз\b": "пастеризованное",
-    r"\bультрапаст\b|\bу/паст\b|\bу/п\b|\bуп\.\b|\bульт\.\b": "ультрапастеризованное",
-    r"\bстерил\b|\bстерил\.\b": "стерилизованное",
-    r"\bтворож\b|\bтвор\.\b|\bтвор\b": "творог",
-    r"\bсмет\b|\bсмет\.\b": "сметана",
-    r"\bсырн\b|\bсыр\.\b": "сыр",
-    r"\bколб\b|\bколб\.\b": "колбаса",
-    r"\bвар\b|\bвар\.\b|\bварен\b": "вареная",
-    r"\bс/к\b|\bсырокопч\b": "сырокопченая",
-    r"\bв/к\b|\bваренокопч\b": "варено-копченая",
-    r"\bп/к\b|\bполукопч\b": "полукопченая",
-    r"\bкопч\b|\bкопч\.\b": "копченый",
-    r"\bшокол\b|\bшок\.\b|\bшокл\b": "шоколад",
-    r"\bкруп\b|\bкр\.\b": "крупа",
-    r"\bгречн\b|\bгреч\.\b|\bгреч\b": "гречневая",
-    r"\bмакар\b|\bмак\.\b|\bизд\.\b": "макароны",
-    r"\bв/с\b|\bвысш\.с\b|\bвысший сорт\b": "высший сорт",
-    r"\b1/с\b|\b1 сорт\b": "первый сорт",
-    r"\bпл/бут\b|\bпэт\b|\bбут\b|\bбут\.\b|\bпл\.бут\b": "пэт бутылка",
-    r"\bт/пак\b|\bтетра\b|\bтетрапак\b|\bтпак\b": "тетрапак",
-    r"\bплен\b|\bпл\.\b|\bпленка\b": "пленка",
-    r"\bупак\b|\bуп\b|\bуп\.\b": "упаковка",
-    r"\bпак\b|\bпак\.\b|\bпакетик\b|\bпакетиков\b": "пакет",
-    r"\bст/б\b|\bстекло\b|\bст\.б\b": "стекло",
-    r"\bж/б\b|\bжесть\b|\bж\.б\b": "жесть",
-    r"\bбрус\b|\bбрусок\b": "брус",
-    r"\bфас\b|\bфас\.\b|\bфасов\b": "фасованный",
-    r"\bкусок\b|\bкус\.\b": "кусок",
-    r"\bнарез\b|\bнарезка\b|\bсл\.\b": "нарезка",
-    r"\bсублим\b|\bсублимир\b": "сублимированный",
-    r"\bраствор\b|\bраств\.\b": "растворимый",
-    r"\bгран\b|\bгранул\b": "гранулированный",
-    r"\bлист\b|\bлистов\b": "листовой",
+    r"(?<!\w)(?:мол\.?|м-ко)(?!\w)": "молоко",
+    r"(?<!\w)(?:масл\.?|м-ло)(?!\w)": "масло",
+    r"(?<!\w)слив(?:\.|очн)?(?!\w)": "сливочное",
+    r"(?<!\w)(?:у/паст\.?|у/п\.?|ультрапаст\.?|ульт\.)(?!\w)": "ультрапастеризованное",
+    r"(?<!\w)(?:паст\.?|пастериз)(?!\w)": "пастеризованное",
+    r"(?<!\w)(?:твор\.?|творож)(?!\w)": "творог",
+    r"(?<!\w)смет\.?(?!\w)": "сметана",
+    r"(?<!\w)колб\.?(?!\w)": "колбаса",
+    r"(?<!\w)(?:с/к|сырокопч)(?!\w)": "сырокопченая",
+    r"(?<!\w)(?:в/к|варенокопч)(?!\w)": "варено копченая",
+    r"(?<!\w)(?:п/к|полукопч)(?!\w)": "полукопченая",
+    r"(?<!\w)(?:пл/бут|пл\.бут|пэт)(?!\w)": "пэт бутылка",
+    r"(?<!\w)(?:т/пак|тетра|тетрапак)(?!\w)": "тетрапак",
+    r"(?<!\w)(?:ст/б|ст\.б|стекло)(?!\w)": "стекло",
+    r"(?<!\w)(?:ж/б|ж\.б|жесть)(?!\w)": "жесть",
+    r"(?<!\w)(?:упак\.?|уп\.)(?!\w)": "упаковка",
+    r"(?<!\w)(?:пак\.?|пакетик(?:ов)?)(?!\w)": "пакет",
+    r"(?<!\w)(?:в/с|высш\.с)(?!\w)": "высший сорт",
+    r"(?<!\w)сублим(?:ир)?\.?(?!\w)": "сублимированный",
+    r"(?<!\w)раств\.?(?!\w)": "растворимый",
+    r"(?<!\w)брусок(?!\w)": "брус",
+    r"(?<!\w)фас\.?(?!\w)": "фасованный",
 }
 
-# Двусторонняя таблица синонимов брендов (латиница <-> кириллица)
-BRAND_SYNONYMS = {
+BRAND_ALIASES = {
     "nescafe": "нескафе",
-    "нескафе": "nescafe",
     "greenfield": "гринфилд",
-    "гринфилд": "greenfield",
     "ritter sport": "риттер спорт",
-    "риттер": "ritter",
+    "ritter": "риттер",
     "makfa": "макфа",
-    "макфа": "makfa",
     "uvelka": "увелка",
-    "увелка": "uvelka",
     "prostokvashino": "простоквашино",
-    "простоквашино": "prostokvashino",
     "jacobs": "якобс",
-    "якобс": "jacobs",
     "tess": "тесс",
-    "тесс": "tess",
     "richard": "ричард",
-    "ричард": "richard",
     "lipton": "липтон",
-    "липтон": "lipton",
     "barilla": "барилла",
-    "барилла": "barilla",
     "milka": "милка",
-    "милка": "milka",
     "alpen gold": "альпен гольд",
     "hochland": "хохланд",
-    "хохланд": "hochland",
     "president": "президент",
     "danone": "данон",
-    "данон": "danone",
     "vyazanka": "вязанка",
-    "вязанка": "vyazanka",
     "dobry": "добрый",
-    "добрый": "dobry",
+}
+
+COLUMN_ALIASES = {
+    "код_товара": {
+        "код товара",
+        "код",
+        "sku",
+        "артикул",
+        "product code",
+        "product id",
+        "item id",
+        "code",
+    },
+    "наименование_товара": {
+        "наименование товара",
+        "наименование",
+        "название товара",
+        "товар",
+        "номенклатура",
+        "product name",
+        "item name",
+        "name",
+    },
+    "цена_закупки": {
+        "цена закупки",
+        "закупочная цена",
+        "себестоимость",
+        "себес",
+        "purchase price",
+        "purchaseprice",
+        "cost price",
+        "cost",
+    },
+    "цена_продажи": {
+        "цена продажи",
+        "розничная цена",
+        "регулярная цена",
+        "цена",
+        "sale price",
+        "saleprice",
+        "retail price",
+        "regular price",
+        "price",
+    },
+    "цена_на_промо": {
+        "цена на промо",
+        "промо цена",
+        "акционная цена",
+        "цена по акции",
+        "promo price",
+        "promoprice",
+        "discount price",
+    },
+}
+
+REQUIRED_COLUMNS = {"код_товара", "наименование_товара", "цена_продажи"}
+OPTIONAL_COLUMNS = {"цена_закупки", "цена_на_промо"}
+INDEX_STOPWORDS = {
+    "товар",
+    "продукт",
+    "упаковка",
+    "фасованный",
+    "высший",
+    "сорт",
+    "шт",
 }
 
 
-def extract_attributes(text: str) -> Dict[str, Any]:
-    """
-    Извлекает физические атрибуты товара: жирность (%), вес/объем, штучность.
-    Позволяет исключить ложный матчинг одноименных товаров с разными характеристиками (напр. 2.5% и 3.2%).
-    """
+def _normalize_header(value: Any) -> str:
+    text = str(value).strip().casefold().replace("ё", "е")
+    text = re.sub(r"[_\-./]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _canonical_header(value: Any) -> str | None:
+    normalized = _normalize_header(value)
+    for canonical, aliases in COLUMN_ALIASES.items():
+        if normalized == _normalize_header(canonical) or normalized in aliases:
+            return canonical
+    return None
+
+
+def _normalize_sku(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        if value.is_integer():
+            return str(int(value))
+    text = str(value).strip()
+    return text or None
+
+
+def _decimal_text(text: str) -> str:
+    text = text.casefold().replace("ё", "е")
+    text = re.sub(r"(?<=\d)[,](?=\d)", ".", text)
+    text = re.sub(r"(?<=\d)\s+(?=\d{3}(?:\D|$))", "", text)
+    return text
+
+
+def _localized_number(value: Any) -> Any:
+    """Подготовить строковую цену с русскими разделителями для ``to_numeric``."""
+
+    if not isinstance(value, str):
+        return value
+    text = re.sub(r"[\s\u00a0\u202f]+", "", value.strip())
     if not text:
-        return {"fat": None, "volume_ml": None, "weight_g": None, "count": None}
+        return None
+    if "," in text and "." in text:
+        if text.rfind(",") > text.rfind("."):
+            return text.replace(".", "").replace(",", ".")
+        return text.replace(",", "")
+    return text.replace(",", ".")
 
-    clean = text.lower().replace(",", ".")
 
-    # 1. Жирность (например: 3.2%, 2.5%, 82.5%, 72.5%, 45%, 15%, 20%)
-    fat = None
-    fat_match = re.search(r"(\d+[\.]?\d*)\s*%", clean)
-    if fat_match:
-        try:
-            fat = float(fat_match.group(1))
-        except ValueError:
-            pass
+def _bounded_positive_number(raw_value: str, maximum: float) -> float | None:
+    """Безопасно разобрать короткое положительное число в заданном диапазоне."""
 
-    # 2. Объем в миллилитрах (0.93л, 1л, 500мл, 930мл, 1.5л)
-    volume_ml = None
-    l_match = re.search(r"(\d+[\.]?\d*)\s*(?:л|l)\b", clean)
-    ml_match = re.search(r"(\d+[\.]?\d*)\s*(?:мл|ml)\b", clean)
-    if l_match:
-        try:
-            volume_ml = int(float(l_match.group(1)) * 1000)
-        except ValueError:
-            pass
-    elif ml_match:
-        try:
-            volume_ml = int(float(ml_match.group(1)))
-        except ValueError:
-            pass
+    if len(raw_value) > MAX_NUMERIC_TOKEN_LENGTH:
+        return None
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(value) or value <= 0 or value > maximum:
+        return None
+    return value
 
-    # 3. Вес в граммах (1кг, 800г, 200г, 100г, 90г, 190г)
-    weight_g = None
-    kg_match = re.search(r"(\d+[\.]?\d*)\s*(?:кг|kg)\b", clean)
-    g_match = re.search(r"(\d+[\.]?\d*)\s*(?:г|гр|g)\b", clean)
-    if kg_match:
-        try:
-            weight_g = int(float(kg_match.group(1)) * 1000)
-        except ValueError:
-            pass
-    elif g_match:
-        try:
-            weight_g = int(float(g_match.group(1)))
-        except ValueError:
-            pass
 
-    # 4. Количество / пакетиков (100 пак, 25 пак, 10 шт, 100х2г)
-    count = None
-    count_match = re.search(r"(\d+)\s*(?:пак|шт|х\d+г|x\d+g)", clean)
-    if count_match:
-        try:
-            count = int(count_match.group(1))
-        except ValueError:
-            pass
+def _measure_in_base_units(raw_value: str, unit: str) -> float | None:
+    value = _bounded_positive_number(raw_value, MAX_PHYSICAL_MEASURE)
+    if value is None:
+        return None
+    factor = 1000.0 if unit in {"кг", "kg", "л", "l"} else 1.0
+    scaled = value * factor
+    if not math.isfinite(scaled) or scaled > MAX_PHYSICAL_MEASURE:
+        return None
+    return scaled
 
-    return {
-        "fat": fat,
-        "volume_ml": volume_ml,
-        "weight_g": weight_g,
-        "count": count
-    }
+
+def extract_attributes(text: str) -> dict[str, Any]:
+    """Извлечь жирность, физическую фасовку и число единиц."""
+
+    attrs = {"fat": None, "volume_ml": None, "weight_g": None, "count": None}
+    if not isinstance(text, str) or not text.strip():
+        return attrs
+
+    clean = _decimal_text(text)
+
+    # 100% у соков и составов не считается жирностью; ритейл-жирность <= 90%.
+    for match in re.finditer(r"(?<![\d.])(\d{1,2}(?:\.\d+)?)\s*%", clean):
+        value = _bounded_positive_number(match.group(1), 90.0)
+        if value is not None:
+            attrs["fat"] = value
+            break
+
+    multipacks = list(
+        re.finditer(
+            r"(?<!\d)(\d{1,3})\s*[xх×]\s*(\d+(?:\.\d+)?)\s*(кг|kg|мл|ml|л|l|гр|г|g)\b",
+            clean,
+        )
+    )
+    weight_values: list[float] = []
+    volume_values: list[float] = []
+    for match in re.finditer(r"(?<![\d.])(\d+(?:\.\d+)?)\s*(кг|kg|гр|г|g)\b", clean):
+        unit = match.group(2)
+        value = _measure_in_base_units(match.group(1), unit)
+        if value is not None:
+            weight_values.append(value)
+    for match in re.finditer(r"(?<![\d.])(\d+(?:\.\d+)?)\s*(мл|ml|л|l)\b", clean):
+        unit = match.group(2)
+        value = _measure_in_base_units(match.group(1), unit)
+        if value is not None:
+            volume_values.append(value)
+
+    # Явный итог в «5x80г (400г)» будет максимальным; без итога вычисляем его.
+    if multipacks:
+        first = multipacks[0]
+        count = int(first.group(1))
+        unit = first.group(3)
+        amount = _measure_in_base_units(first.group(2), unit)
+        total = amount * count if amount is not None else None
+        if total is not None and math.isfinite(total) and total <= MAX_PHYSICAL_MEASURE:
+            attrs["count"] = count
+            if unit in {"кг", "kg", "гр", "г", "g"}:
+                weight_values.append(total)
+            else:
+                volume_values.append(total)
+
+    if weight_values:
+        attrs["weight_g"] = int(round(max(weight_values)))
+    if volume_values:
+        attrs["volume_ml"] = int(round(max(volume_values)))
+
+    if attrs["count"] is None:
+        count_match = re.search(
+            r"(?<!\d)(\d{1,4})\s*(?:шт(?:ук)?|пак(?:етик(?:ов)?)?|таб(?:леток)?|капсул)(?!\w)",
+            clean,
+        )
+        if count_match:
+            attrs["count"] = int(count_match.group(1))
+    return attrs
+
+
+def _canonicalize_units(text: str) -> str:
+    def liters(match: re.Match[str]) -> str:
+        value = _measure_in_base_units(match.group(1), "л")
+        return match.group(0) if value is None else f"{int(round(value))}мл"
+
+    def kilograms(match: re.Match[str]) -> str:
+        value = _measure_in_base_units(match.group(1), "кг")
+        return match.group(0) if value is None else f"{int(round(value))}г"
+
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*(?:л|l)\b", liters, text)
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*(?:кг|kg)\b", kilograms, text)
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*(?:мл|ml)\b", r"\1мл", text)
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*(?:гр|г|g)\b", r"\1г", text)
+    return text
 
 
 def normalize_product_text(text: str) -> str:
-    """
-    Глубокая нормализация текста товара:
-    1. Приведение к нижнему регистру и замена спецсимволов.
-    2. Расшифровка ритейл-сокращений.
-    3. Стандартизация написания процентов и единиц измерения.
-    4. Обогащение синонимами брендов для кросс-языкового матчинга.
-    """
-    if not text or not isinstance(text, str):
+    """Нормализовать название, сохраняя десятичные числа и фасовку."""
+
+    if not isinstance(text, str) or not text.strip():
         return ""
-
-    clean = text.lower()
-
-    # Заменяем разделители и спецсимволы на пробелы
-    clean = re.sub(r"[,/\\()\"'«»№#;:_\-\+—–]", " ", clean)
-
-    # Заменяем сокращения на полные слова
+    clean = _decimal_text(text)
     for pattern, replacement in ABBREVIATIONS_MAP.items():
         clean = re.sub(pattern, replacement, clean)
+    for alias, canonical in sorted(BRAND_ALIASES.items(), key=lambda pair: -len(pair[0])):
+        clean = re.sub(rf"(?<!\w){re.escape(alias)}(?!\w)", canonical, clean)
+    clean = _canonicalize_units(clean)
+    clean = re.sub(r"[,/\\()\[\]{}\"'«»№#;:_+—–-]", " ", clean)
+    clean = re.sub(r"(\d+(?:\.\d+)?)\s*%", r"\1%", clean)
+    return re.sub(r"\s+", " ", clean).strip()
 
-    # Добавляем синонимы брендов (например: если написано nescafe, добавляем нескафе)
-    for eng_brand, rus_brand in BRAND_SYNONYMS.items():
-        if eng_brand in clean and rus_brand not in clean:
-            clean = f"{clean} {rus_brand}"
 
-    # Стандартизируем числа с процентами и объемами (3.2 % -> 3.2%, 930 мл -> 930мл)
-    clean = re.sub(r"(\d+[\.,]?\d*)\s*%", r"\1%", clean)
-    clean = re.sub(r"(\d+[\.,]?\d*)\s*л\b", r"\1л", clean)
-    clean = re.sub(r"(\d+[\.,]?\d*)\s*мл\b", r"\1мл", clean)
-    clean = re.sub(r"(\d+[\.,]?\d*)\s*кг\b", r"\1кг", clean)
-    clean = re.sub(r"(\d+[\.,]?\d*)\s*(?:г|гр)\b", r"\1г", clean)
+def _brand_is_present(explicit_brand: str, candidate_norm: str) -> bool:
+    """Проверить, что все значимые токены явно распознанного бренда есть в SKU."""
 
-    # Схлопываем лишние пробелы
-    clean = re.sub(r"\s+", " ", clean).strip()
-    return clean
+    brand_norm = normalize_product_text(explicit_brand)
+    brand_tokens = {token for token in brand_norm.split() if len(token) >= 2}
+    if not brand_tokens:
+        return True
+    return brand_tokens.issubset(set(candidate_norm.split()))
+
+
+def _attribute_conflict(query: dict[str, Any], candidate: dict[str, Any]) -> str | None:
+    q_fat, c_fat = query.get("fat"), candidate.get("fat")
+    if q_fat is not None and c_fat is not None and not math.isclose(q_fat, c_fat, abs_tol=0.05):
+        return "fat"
+
+    q_weight, c_weight = query.get("weight_g"), candidate.get("weight_g")
+    q_volume, c_volume = query.get("volume_ml"), candidate.get("volume_ml")
+    if q_weight is not None and c_volume is not None:
+        return "dimension"
+    if q_volume is not None and c_weight is not None:
+        return "dimension"
+    if q_weight is not None and c_weight is not None and abs(q_weight - c_weight) > 1:
+        return "weight"
+    if q_volume is not None and c_volume is not None and abs(q_volume - c_volume) > 1:
+        return "volume"
+
+    q_count, c_count = query.get("count"), candidate.get("count")
+    if q_count is not None and c_count is not None and q_count != c_count:
+        return "count"
+    return None
 
 
 class CatalogMatcher:
-    """
-    Высокоточный матчер номенклатуры Самбери.
-    Гарантирует устойчивость к перестановкам слов, разным формулировкам и исключает ошибки сопоставления.
-    """
+    """Матчер с жёсткими физическими ограничениями и контролем неоднозначности."""
 
-    def __init__(self, catalog_df: Optional[pd.DataFrame] = None):
-        self.catalog_df: pd.DataFrame = pd.DataFrame()
-        self.catalog_records: List[Dict[str, Any]] = []
-        self.normalized_catalog_names: List[str] = []
-        self.catalog_attributes: List[Dict[str, Any]] = []
-
-        if catalog_df is not None and not catalog_df.empty:
+    def __init__(self, catalog_df: pd.DataFrame | None = None):
+        self.catalog_df = pd.DataFrame()
+        self.catalog_records: list[dict[str, Any]] = []
+        self.normalized_catalog_names: list[str] = []
+        self.catalog_attributes: list[dict[str, Any]] = []
+        self._token_index: dict[str, set[int]] = defaultdict(set)
+        if catalog_df is not None:
             self.load_catalog(catalog_df)
 
-    def load_catalog(self, df: pd.DataFrame) -> None:
-        """
-        Индексирует номенклатурную матрицу сети Самбери с извлечением физических атрибутов.
-        """
-        df = df.copy()
+    @staticmethod
+    def empty_match(reason: str = "Соответствие не найдено") -> dict[str, Any]:
+        return {
+            "matched_sku": None,
+            "matched_name": None,
+            "our_purchase_price": None,
+            "our_sale_price": None,
+            "our_promo_price": None,
+            "match_score": 0.0,
+            "match_reason": reason,
+            "candidates": [],
+        }
 
-        # Автоматическое определение колонок
-        col_map = {}
-        for col in df.columns:
-            c_lower = str(col).lower().strip()
-            if any(k in c_lower for k in ["код", "sku", "артикул", "code", "id"]):
-                col_map[col] = "код_товара"
-            elif any(k in c_lower for k in ["наименование", "название", "товар", "name", "номенклатура"]):
-                col_map[col] = "наименование_товара"
-            elif any(k in c_lower for k in ["закупк", "себестоим", "cost", "себес"]):
-                col_map[col] = "цена_закупки"
-            elif any(k in c_lower for k in ["промо", "акци", "promo", "скидк"]):
-                col_map[col] = "цена_на_промо"
-            elif any(k in c_lower for k in ["продаж", "цена", "регуляр", "retail", "price"]):
-                col_map[col] = "цена_продажи"
+    def load_catalog(self, source: pd.DataFrame) -> None:
+        if not isinstance(source, pd.DataFrame) or source.empty:
+            raise CatalogSchemaError("Справочник пуст.")
+        if source.columns.duplicated().any():
+            raise CatalogSchemaError("В справочнике есть колонки с одинаковыми названиями.")
 
-        df.rename(columns=col_map, inplace=True)
+        frame = source.copy()
+        mapping: dict[Any, str] = {}
+        targets: dict[str, list[Any]] = defaultdict(list)
+        for column in frame.columns:
+            target = _canonical_header(column)
+            if target:
+                targets[target].append(column)
+        ambiguous = {target: cols for target, cols in targets.items() if len(cols) > 1}
+        if ambiguous:
+            details = "; ".join(
+                f"{target}: {', '.join(map(str, cols))}" for target, cols in ambiguous.items()
+            )
+            raise CatalogSchemaError(f"Неоднозначные колонки справочника: {details}")
+        for target, columns in targets.items():
+            mapping[columns[0]] = target
+        frame.rename(columns=mapping, inplace=True)
 
-        for req_col in ["код_товара", "наименование_товара", "цена_закупки", "цена_продажи", "цена_на_промо"]:
-            if req_col not in df.columns:
-                df[req_col] = None
+        missing = sorted(REQUIRED_COLUMNS - set(frame.columns))
+        if missing:
+            raise CatalogSchemaError("Не найдены обязательные колонки: " + ", ".join(missing))
+        for optional in OPTIONAL_COLUMNS:
+            if optional not in frame.columns:
+                frame[optional] = None
 
-        for num_col in ["цена_закупки", "цена_продажи", "цена_на_промо"]:
-            df[num_col] = pd.to_numeric(df[num_col], errors="coerce")
+        # Unknown source columns are not needed for matching and can multiply
+        # the Python object graph when records are materialized.
+        frame = frame[
+            [
+                "код_товара",
+                "наименование_товара",
+                "цена_закупки",
+                "цена_продажи",
+                "цена_на_промо",
+            ]
+        ].copy()
 
-        df["код_товара"] = df["код_товара"].astype(str)
-        df["наименование_товара"] = df["наименование_товара"].fillna("").astype(str)
-        
-        # Индексируем нормализованные названия и атрибуты
-        df["_norm_name"] = df["наименование_товара"].apply(normalize_product_text)
-        df["_attrs"] = df["наименование_товара"].apply(extract_attributes)
+        frame = frame.dropna(axis=0, how="all").copy()
+        frame["код_товара"] = frame["код_товара"].map(_normalize_sku)
+        frame["наименование_товара"] = frame["наименование_товара"].map(
+            lambda value: "" if pd.isna(value) else str(value).strip()[:500]
+        )
+        invalid_identity = frame["код_товара"].isna() | frame["наименование_товара"].eq("")
+        if invalid_identity.any():
+            raise CatalogSchemaError(
+                f"У {int(invalid_identity.sum())} строк нет SKU или наименования."
+            )
+        if frame["код_товара"].duplicated().any():
+            duplicates = frame.loc[frame["код_товара"].duplicated(), "код_товара"].head(5)
+            raise CatalogSchemaError(
+                "В справочнике повторяются SKU: " + ", ".join(duplicates.astype(str))
+            )
 
-        self.catalog_df = df
-        self.catalog_records = df.to_dict(orient="records")
-        self.normalized_catalog_names = df["_norm_name"].tolist()
-        self.catalog_attributes = df["_attrs"].tolist()
+        for column in ("цена_закупки", "цена_продажи", "цена_на_промо"):
+            frame[column] = pd.to_numeric(frame[column].map(_localized_number), errors="coerce")
+            finite_mask = frame[column].map(
+                lambda value: pd.isna(value) or math.isfinite(float(value))
+            )
+            if not finite_mask.all():
+                raise CatalogSchemaError(f"Колонка «{column}» содержит бесконечные значения.")
+            if (frame[column].dropna() < 0).any():
+                raise CatalogSchemaError(f"Колонка «{column}» содержит отрицательные цены.")
+            frame.loc[frame[column] == 0, column] = None
+        if frame["цена_продажи"].isna().any():
+            raise CatalogSchemaError("У части товаров отсутствует положительная цена продажи.")
+
+        frame["_norm_name"] = frame["наименование_товара"].map(normalize_product_text)
+        frame["_attrs"] = frame["наименование_товара"].map(extract_attributes)
+        self.catalog_df = frame.reset_index(drop=True)
+        self.catalog_records = self.catalog_df.to_dict(orient="records")
+        self.normalized_catalog_names = self.catalog_df["_norm_name"].tolist()
+        self.catalog_attributes = self.catalog_df["_attrs"].tolist()
+
+        self._token_buckets: list[list[int]] = [[] for _ in range(MAX_TOKEN_BUCKETS)]
+        self._ngram_buckets: list[list[int]] = [[] for _ in range(MAX_NGRAM_BUCKETS)]
+        for index, normalized in enumerate(self.normalized_catalog_names):
+            selected_tokens = sorted(
+                {
+                    token
+                    for token in normalized.split()
+                    if len(token) >= 3 and token not in INDEX_STOPWORDS
+                },
+                key=lambda value: (_trigram_hash(value), value),
+            )[:MAX_INDEX_TOKENS_PER_NAME]
+            for bucket_id in {
+                _trigram_hash(token) % MAX_TOKEN_BUCKETS for token in selected_tokens
+            }:
+                postings = self._token_buckets[bucket_id]
+                if len(postings) < MAX_TOKEN_POSTINGS:
+                    postings.append(index)
+            selected_trigrams = sorted(
+                _character_trigrams(normalized), key=lambda value: (_trigram_hash(value), value)
+            )[:MAX_INDEX_NGRAMS_PER_NAME]
+            for bucket_id in {
+                _trigram_hash(trigram) % MAX_NGRAM_BUCKETS for trigram in selected_trigrams
+            }:
+                postings = self._ngram_buckets[bucket_id]
+                if len(postings) < MAX_NGRAM_POSTINGS:
+                    postings.append(index)
+
+    def _candidate_indices(self, query_norm: str) -> list[int]:
+        counts: Counter[int] = Counter()
+        query_token_buckets = {
+            _trigram_hash(token) % MAX_TOKEN_BUCKETS
+            for token in query_norm.split()
+            if len(token) >= 3 and token not in INDEX_STOPWORDS
+        }
+        token_buckets = sorted(
+            ((len(self._token_buckets[bucket_id]), bucket_id) for bucket_id in query_token_buckets),
+            key=lambda entry: (entry[0], entry[1]),
+        )
+        for posting_count, bucket_id in token_buckets[:MAX_QUERY_TOKEN_BUCKETS]:
+            if posting_count:
+                counts.update(self._token_buckets[bucket_id])
+        if counts:
+            ranked = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+            return [index for index, _ in ranked[:MAX_CANDIDATE_POOL]]
+
+        # A full-catalog fuzzy scan is an easy CPU DoS at 100k SKUs × 200 tags.
+        # Use fixed hash buckets for a memory-bounded typo-tolerant fallback.
+        query_buckets = {
+            _trigram_hash(trigram) % MAX_NGRAM_BUCKETS
+            for trigram in _character_trigrams(query_norm)
+        }
+        available = sorted(
+            ((len(self._ngram_buckets[bucket_id]), bucket_id) for bucket_id in query_buckets),
+            key=lambda entry: (entry[0], entry[1]),
+        )
+        for posting_count, bucket_id in available[:MAX_QUERY_NGRAMS]:
+            if posting_count:
+                counts.update(self._ngram_buckets[bucket_id])
+        ranked = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+        return [index for index, _ in ranked[:MAX_CANDIDATE_POOL]]
 
     def compute_match_score(
         self,
         query_raw: str,
         query_norm: str,
-        query_attrs: Dict[str, Any],
+        query_attrs: dict[str, Any],
         cand_raw: str,
         cand_norm: str,
-        cand_attrs: Dict[str, Any]
+        cand_attrs: dict[str, Any],
     ) -> float:
-        """
-        Вычисляет многофакторную оценку совпадения (0-100%).
-        Использует Token Sort Ratio, Token Set Ratio и валидацию атрибутов.
-        """
-        # 1. Token Sort Ratio: полностью инвариантен к порядку слов!
+        del query_raw, cand_raw
+        if _attribute_conflict(query_attrs, cand_attrs):
+            return 0.0
         sort_score = fuzz.token_sort_ratio(query_norm, cand_norm)
-
-        # 2. Token Set Ratio: учитывает подмножества слов (когда на ценнике есть доп. слова)
         set_score = fuzz.token_set_ratio(query_norm, cand_norm)
+        score = 0.45 * sort_score + 0.55 * set_score
 
-        # 3. Базовый скор сопоставления
-        base_score = max(sort_score, set_score * 0.95)
-
-        # 4. Проверка и валидация физических атрибутов:
-        # А) Жирность (Критически важно! 3.2% vs 2.5% — абсолютно разные товары)
-        q_fat = query_attrs.get("fat")
-        c_fat = cand_attrs.get("fat")
-        if q_fat is not None and c_fat is not None:
-            if abs(q_fat - c_fat) < 0.01:
-                base_score = min(100.0, base_score + 8.0) # Бонус за точное совпадение жирности
-            else:
-                base_score -= 40.0 # Жесткий штраф за несовпадение жирности!
-
-        # Б) Вес / объем (например: 190г vs 95г)
-        q_w = query_attrs.get("weight_g") or query_attrs.get("volume_ml")
-        c_w = cand_attrs.get("weight_g") or cand_attrs.get("volume_ml")
-        if q_w is not None and c_w is not None:
-            if q_w == c_w:
-                base_score = min(100.0, base_score + 6.0)
-            elif abs(q_w - c_w) > 50:
-                base_score -= 25.0 # Штраф за разную фасовку
-
-        # В) Количество (пакетиков/штук)
-        q_cnt = query_attrs.get("count")
-        c_cnt = cand_attrs.get("count")
-        if q_cnt is not None and c_cnt is not None:
-            if q_cnt == c_cnt:
-                base_score = min(100.0, base_score + 6.0)
-            else:
-                base_score -= 25.0
-
-        return max(0.0, min(100.0, round(base_score, 1)))
+        for key, bonus in (("fat", 7.0), ("weight_g", 7.0), ("volume_ml", 7.0), ("count", 4.0)):
+            query_value = query_attrs.get(key)
+            candidate_value = cand_attrs.get(key)
+            if query_value is not None and candidate_value is not None:
+                score += bonus
+            elif query_value is not None and candidate_value is None:
+                score -= 8.0
+        return round(max(0.0, min(100.0, score)), 1)
 
     def match_item(
         self,
         recognized_name: str,
-        threshold: float = 65.0,
-        top_k: int = 3
-    ) -> Dict[str, Any]:
-        """
-        Ищет точное совпадение в номенклатуре Самбери независимо от порядка слов и сокращений.
-        """
-        if not self.catalog_records or not recognized_name:
-            return {
-                "matched_sku": None,
-                "matched_name": None,
-                "our_purchase_price": None,
-                "our_sale_price": None,
-                "our_promo_price": None,
-                "match_score": 0.0,
-                "candidates": []
-            }
+        threshold: float = DEFAULT_MATCH_THRESHOLD,
+        top_k: int = 3,
+        *,
+        brand: str | None = None,
+        weight_volume: str | None = None,
+        min_margin: float = DEFAULT_MIN_MARGIN,
+    ) -> dict[str, Any]:
+        if not self.catalog_records or not str(recognized_name or "").strip():
+            return self.empty_match()
+        top_k = max(1, min(int(top_k), 10))
+        query_parts = [str(recognized_name)]
+        if brand and str(brand).casefold() not in str(recognized_name).casefold():
+            query_parts.append(str(brand))
+        if weight_volume:
+            query_parts.append(str(weight_volume))
+        query_raw = " ".join(query_parts)
+        query_norm = normalize_product_text(query_raw)
+        query_attrs = extract_attributes(query_raw)
+        explicit_brand = str(brand or "").strip()
 
-        query_norm = normalize_product_text(recognized_name)
-        query_attrs = extract_attributes(recognized_name)
-
-        # Вычисляем скоры для всех позиций каталога
-        scored_candidates = []
-        for idx, rec in enumerate(self.catalog_records):
-            cand_raw = rec.get("наименование_товара", "")
-            cand_norm = self.normalized_catalog_names[idx]
-            cand_attrs = self.catalog_attributes[idx]
-
-            final_score = self.compute_match_score(
-                query_raw=recognized_name,
-                query_norm=query_norm,
-                query_attrs=query_attrs,
-                cand_raw=cand_raw,
-                cand_norm=cand_norm,
-                cand_attrs=cand_attrs
+        candidates: list[dict[str, Any]] = []
+        for index in self._candidate_indices(query_norm):
+            record = self.catalog_records[index]
+            candidate_norm = self.normalized_catalog_names[index]
+            if explicit_brand and not _brand_is_present(explicit_brand, candidate_norm):
+                continue
+            score = self.compute_match_score(
+                query_raw,
+                query_norm,
+                query_attrs,
+                record["наименование_товара"],
+                candidate_norm,
+                self.catalog_attributes[index],
             )
+            if score <= 0:
+                continue
+            candidates.append(
+                {
+                    "sku": record["код_товара"],
+                    "name": record["наименование_товара"],
+                    "purchase_price": record["цена_закупки"],
+                    "sale_price": record["цена_продажи"],
+                    "promo_price": record["цена_на_промо"],
+                    "score": score,
+                }
+            )
+        candidates.sort(key=lambda item: (-item["score"], item["sku"]))
+        top = candidates[:top_k]
+        if not top or top[0]["score"] < threshold:
+            result = self.empty_match("Недостаточная точность сопоставления")
+            result["match_score"] = top[0]["score"] if top else 0.0
+            result["candidates"] = top
+            return result
+        if len(top) > 1 and top[0]["score"] - top[1]["score"] < min_margin:
+            result = self.empty_match("Неоднозначное сопоставление — требуется проверка")
+            result["match_score"] = top[0]["score"]
+            result["candidates"] = top
+            return result
 
-            if final_score >= 30.0:
-                scored_candidates.append({
-                    "sku": rec["код_товара"],
-                    "name": rec["наименование_товара"],
-                    "purchase_price": rec["цена_закупки"],
-                    "sale_price": rec["цена_продажи"],
-                    "promo_price": rec["цена_на_промо"],
-                    "score": final_score
-                })
+        best = top[0]
+        return {
+            "matched_sku": best["sku"],
+            "matched_name": best["name"],
+            "our_purchase_price": best["purchase_price"],
+            "our_sale_price": best["sale_price"],
+            "our_promo_price": best["promo_price"],
+            "match_score": best["score"],
+            "match_reason": "Автоматическое сопоставление",
+            "candidates": top,
+        }
 
-        # Сортируем кандидатов по убыванию качества совпадения
-        scored_candidates.sort(key=lambda x: x["score"], reverse=True)
-        top_candidates = scored_candidates[:top_k]
-
-        best = top_candidates[0] if top_candidates and top_candidates[0]["score"] >= threshold else None
-
-        if best:
-            return {
-                "matched_sku": best["sku"],
-                "matched_name": best["name"],
-                "our_purchase_price": best["purchase_price"],
-                "our_sale_price": best["sale_price"],
-                "our_promo_price": best["promo_price"],
-                "match_score": best["score"],
-                "candidates": top_candidates
-            }
-        else:
-            return {
-                "matched_sku": None,
-                "matched_name": "Не найдено точного соответствия",
-                "our_purchase_price": None,
-                "our_sale_price": None,
-                "our_promo_price": None,
-                "match_score": top_candidates[0]["score"] if top_candidates else 0.0,
-                "candidates": top_candidates
-            }
-
-    def match_all(self, recognized_items: List[Dict[str, Any]], threshold: float = 65.0) -> List[Dict[str, Any]]:
-        """Сопоставляет весь массив распознанных ценников."""
-        matched_results = []
+    def match_all(
+        self,
+        recognized_items: list[dict[str, Any]],
+        threshold: float = DEFAULT_MATCH_THRESHOLD,
+    ) -> list[dict[str, Any]]:
+        results = []
         for item in recognized_items:
-            rec_name = item.get("product_name", "")
-            match_info = self.match_item(rec_name, threshold=threshold)
-            matched_results.append({**item, **match_info})
-        return matched_results
+            match = self.match_item(
+                str(item.get("product_name") or ""),
+                threshold=threshold,
+                brand=item.get("brand"),
+                weight_volume=item.get("weight_volume"),
+            )
+            results.append({**item, **match})
+        return results
